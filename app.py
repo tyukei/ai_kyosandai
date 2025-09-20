@@ -137,8 +137,22 @@ def call_dify(prompt: str) -> str:
     api_key, base_url, user_identifier = _get_dify_config()
     conversation_id = st.session_state.get("dify_conversation_id")
 
+    inputs: dict[str, object] = {}
+
+    file_id = st.session_state.get("dify_file_id", "").strip()
+    if file_id:
+        inputs["file_id"] = file_id
+
+    is_rag_value = st.session_state.get("dify_is_rag", "")
+    if isinstance(is_rag_value, str) and is_rag_value.strip().lower() == "true":
+        inputs["is_rag"] = "true"
+
+    system_prompt = st.session_state.get("dify_system_prompt", "").strip()
+    if system_prompt:
+        inputs["system_prompt"] = system_prompt
+
     payload = {
-        "inputs": {},
+        "inputs": inputs,
         "query": prompt,
         "response_mode": "blocking",
         "user": user_identifier,
@@ -239,6 +253,9 @@ def main_ui():
                     except Exception as exc:  # noqa: BLE001 - Streamlit surface for user feedback
                         st.error(f"アップロードに失敗しました: {exc}")
                     else:
+                        uploaded_file_id = result.get("id")
+                        if uploaded_file_id:
+                            st.session_state.dify_file_id = uploaded_file_id
                         link = result.get("webViewLink")
                         if link:
                             st.success(f"アップロード完了: [{result['name']}]({link})")
@@ -252,11 +269,41 @@ def main_ui():
     if "dify_conversation_id" not in st.session_state:
         st.session_state.dify_conversation_id = None
 
+    if "dify_file_id" not in st.session_state:
+        st.session_state.dify_file_id = ""
+
+    if "dify_is_rag" not in st.session_state:
+        st.session_state.dify_is_rag = ""
+
+    if "dify_system_prompt" not in st.session_state:
+        st.session_state.dify_system_prompt = ""
+
+    with st.expander("Dify オプション", expanded=False):
+        st.text_input(
+            "file_id (任意)",
+            key="dify_file_id",
+            help="Google Drive などにアップロード済みのファイルID。設定すると RAG 用入力として渡されます。",
+        )
+        st.selectbox(
+            "is_rag (任意)",
+            options=["", "true"],
+            key="dify_is_rag",
+            help="RAG を利用したい場合は 'true' を選択します。",
+        )
+        st.text_area(
+            "system_prompt (任意)",
+            key="dify_system_prompt",
+            help="モデルに渡すシステムプロンプトを上書きしたい場合に入力します。",
+        )
+
     if st.button("会話をリセット", key="reset-conversastion"):
         st.session_state.messages = [
             {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
         ]
         st.session_state.dify_conversation_id = None
+        st.session_state.dify_file_id = ""
+        st.session_state.dify_is_rag = ""
+        st.session_state.dify_system_prompt = ""
         st.rerun()
 
     for message in st.session_state.messages:
