@@ -1,4 +1,5 @@
 import io
+import json
 from typing import Optional
 
 import streamlit as st
@@ -133,7 +134,7 @@ def _get_dify_config():
     return api_key, base_url, user_identifier
 
 
-def call_dify(prompt: str) -> str:
+def stream_dify(prompt: str):
     api_key, base_url, user_identifier = _get_dify_config()
     conversation_id = st.session_state.get("dify_conversation_id")
 
@@ -154,7 +155,7 @@ def call_dify(prompt: str) -> str:
     payload = {
         "inputs": inputs,
         "query": prompt,
-        "response_mode": "blocking",
+        "response_mode": "streaming",
         "user": user_identifier,
     }
     if conversation_id:
@@ -165,72 +166,155 @@ def call_dify(prompt: str) -> str:
         "Content-Type": "application/json",
     }
 
-    response = requests.post(
+    with requests.post(
         f"{base_url}/v1/chat-messages",
         json=payload,
         headers=headers,
         timeout=30,
-    )
-    response.raise_for_status()
-    data = response.json()
+        stream=True,
+    ) as response:
+        response.raise_for_status()
 
-    if new_conversation_id := data.get("conversation_id"):
-        st.session_state.dify_conversation_id = new_conversation_id
+        accumulated_answer = ""
 
-    answer = data.get("answer")
-    if not answer:
-        raise ValueError("Dify から応答が取得できませんでした")
-    return answer
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            if not raw_line.startswith("data:"):
+                continue
+            data_str = raw_line[len("data:"):].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+
+            if conversation_id := chunk.get("conversation_id"):
+                st.session_state.dify_conversation_id = conversation_id
+
+            delta = ""
+            if isinstance(chunk.get("answer_delta"), str):
+                delta = chunk["answer_delta"]
+                if delta:
+                    accumulated_answer += delta
+            elif isinstance(chunk.get("answer"), str):
+                answer_full = chunk["answer"]
+                if answer_full.startswith(accumulated_answer):
+                    delta = answer_full[len(accumulated_answer) :]
+                else:
+                    delta = answer_full
+                accumulated_answer = answer_full
+            elif isinstance(chunk.get("message"), dict):
+                message = chunk["message"]
+                answer_full = message.get("answer") if isinstance(message.get("answer"), str) else ""
+                if answer_full:
+                    if answer_full.startswith(accumulated_answer):
+                        delta = answer_full[len(accumulated_answer) :]
+                    else:
+                        delta = answer_full
+                    accumulated_answer = answer_full
+
+            if delta:
+                yield delta
+
+        if not accumulated_answer:
+            raise ValueError("Dify から応答が取得できませんでした")
 
 def main_ui():
     st.set_page_config(page_title="Chat Demo", page_icon="💬", layout="wide")
     st.title("Chat Demo")
 
-
     if "drive_credentials" not in st.session_state:
         st.session_state.drive_credentials = None
-
     if "drive_auth_flow" not in st.session_state:
         st.session_state.drive_auth_flow = None
-
     if "drive_auth_url" not in st.session_state:
         st.session_state.drive_auth_url = None
-
     if "is_google_authenticated" not in st.session_state:
         st.session_state.is_google_authenticated = False
-
     if "show_drive_uploader" not in st.session_state:
         st.session_state.show_drive_uploader = False
 
     creds = ensure_drive_credentials()
 
-    if not creds:
-        st.info("Google Drive へアップロードするには、Google アカウントの認証が必要です。")
-        if not st.session_state.is_google_authenticated and st.button("Google アカウントと連携", key="start-drive-auth"):
-            try:
-                start_oauth_flow()
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"認証フローを開始できませんでした: {exc}")
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
+        ]
+    if "dify_conversation_id" not in st.session_state:
+        st.session_state.dify_conversation_id = None
+    if "dify_file_id" not in st.session_state:
+        st.session_state.dify_file_id = ""
+    if "dify_is_rag" not in st.session_state:
+        st.session_state.dify_is_rag = ""
+    if "dify_system_prompt" not in st.session_state:
+        st.session_state.dify_system_prompt = ""
 
-        if st.session_state.get("drive_auth_url"):
-            st.markdown(
-                f"1. [こちらのリンク]({st.session_state.drive_auth_url}) を開いてアクセスを許可してください。\n"
-                "2. 表示された認証コードを以下に貼り付けて送信してください。"
-            )
-            with st.form("drive-auth-form"):
-                auth_code = st.text_input("認証コード", key="drive-auth-code")
-                submitted = st.form_submit_button("認証コードを送信")
-            if submitted and auth_code:
-                complete_oauth_flow(auth_code.strip())
-    else:
-        st.success("Google Drive に接続されています。")
-        if st.button("Google アカウントの連携を解除", key="reset-drive-auth"):
-            st.session_state.drive_credentials = None
-            st.session_state.drive_auth_flow = None
-            st.session_state.drive_auth_url = None
-            st.session_state.is_google_authenticated = False
-            st.session_state.show_drive_uploader = False
-            st.info("Google アカウントの連携を解除しました。必要であれば再度認証してください。")
+    with st.sidebar:
+        st.subheader("Dify オプション")
+        st.text_input(
+            "file_id (任意)",
+            key="dify_file_id",
+            help="Google Drive などにアップロード済みのファイルID。設定すると RAG 用入力として渡されます。",
+        )
+        st.selectbox(
+            "is_rag (任意)",
+            options=["", "true"],
+            key="dify_is_rag",
+            help="RAG を利用したい場合は 'true' を選択します。",
+        )
+        st.text_area(
+            "system_prompt (任意)",
+            key="dify_system_prompt",
+            help="モデルに渡すシステムプロンプトを上書きしたい場合に入力します。",
+        )
+
+        if st.button("会話をリセット", key="reset-conversastion"):
+            st.session_state.messages = [
+                {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
+            ]
+            st.session_state.dify_conversation_id = None
+            st.session_state.dify_file_id = ""
+            st.session_state.dify_is_rag = ""
+            st.session_state.dify_system_prompt = ""
+            st.rerun()
+
+        st.markdown("---")
+        st.subheader("Google Drive 接続")
+        if not creds:
+            st.info("Google Drive と連携するには下のボタンから認証してください。")
+            if not st.session_state.is_google_authenticated and st.button("Google アカウントと連携", key="start-drive-auth"):
+                try:
+                    start_oauth_flow()
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"認証フローを開始できませんでした: {exc}")
+
+            if st.session_state.get("drive_auth_url"):
+                st.markdown(
+                    f"1. [こちらのリンク]({st.session_state.drive_auth_url}) を開いてアクセスを許可してください。\n"
+                    "2. 表示された認証コードを以下に貼り付けて送信してください。"
+                )
+                with st.form("drive-auth-form"):
+                    auth_code = st.text_input("認証コード", key="drive-auth-code")
+                    submitted = st.form_submit_button("認証コードを送信")
+                if submitted and auth_code:
+                    complete_oauth_flow(auth_code.strip())
+        else:
+            st.success("Google Drive に接続されています。")
+            if st.button("Google アカウントの連携を解除", key="reset-drive-auth"):
+                st.session_state.drive_credentials = None
+                st.session_state.drive_auth_flow = None
+                st.session_state.drive_auth_url = None
+                st.session_state.is_google_authenticated = False
+                st.session_state.show_drive_uploader = False
+                st.info("Google アカウントの連携を解除しました。必要であれば再度認証してください。")
+
+    creds = st.session_state.get("drive_credentials")
+
+    if creds:
         if not st.session_state.show_drive_uploader:
             if st.button("アップロードフォームを表示", key="toggle-drive-upload-show"):
                 st.session_state.show_drive_uploader = True
@@ -261,50 +345,8 @@ def main_ui():
                             st.success(f"アップロード完了: [{result['name']}]({link})")
                         else:
                             st.success(f"アップロード完了。ファイルID: {result['id']}")
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
-        ]
-
-    if "dify_conversation_id" not in st.session_state:
-        st.session_state.dify_conversation_id = None
-
-    if "dify_file_id" not in st.session_state:
-        st.session_state.dify_file_id = ""
-
-    if "dify_is_rag" not in st.session_state:
-        st.session_state.dify_is_rag = ""
-
-    if "dify_system_prompt" not in st.session_state:
-        st.session_state.dify_system_prompt = ""
-
-    with st.expander("Dify オプション", expanded=False):
-        st.text_input(
-            "file_id (任意)",
-            key="dify_file_id",
-            help="Google Drive などにアップロード済みのファイルID。設定すると RAG 用入力として渡されます。",
-        )
-        st.selectbox(
-            "is_rag (任意)",
-            options=["", "true"],
-            key="dify_is_rag",
-            help="RAG を利用したい場合は 'true' を選択します。",
-        )
-        st.text_area(
-            "system_prompt (任意)",
-            key="dify_system_prompt",
-            help="モデルに渡すシステムプロンプトを上書きしたい場合に入力します。",
-        )
-
-    if st.button("会話をリセット", key="reset-conversastion"):
-        st.session_state.messages = [
-            {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
-        ]
-        st.session_state.dify_conversation_id = None
-        st.session_state.dify_file_id = ""
-        st.session_state.dify_is_rag = ""
-        st.session_state.dify_system_prompt = ""
-        st.rerun()
+    else:
+        st.empty()
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -315,16 +357,19 @@ def main_ui():
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
+            response_container = st.empty()
+            accumulated_response = ""
             try:
                 with st.spinner("Dify から応答を取得しています..."):
-                    response = call_dify(prompt)
+                    for delta in stream_dify(prompt):
+                        accumulated_response += delta
+                        response_container.markdown(accumulated_response)
             except Exception as exc:  # noqa: BLE001 - surface API errors to user
                 error_message = f"応答の取得に失敗しました: {exc}"
                 st.session_state.messages.append({"role": "assistant", "content": error_message})
-                st.error(error_message)
+                response_container.error(error_message)
             else:
-                st.session_state.messages.append({"role": "assistant", "content": response})
-                st.markdown(response)
+                st.session_state.messages.append({"role": "assistant", "content": accumulated_response})
 
 
 main_ui()
