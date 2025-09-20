@@ -6,9 +6,13 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+import requests
 
 
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+
+# google drive周りの設定
 
 
 def _get_oauth_client_config() -> dict:
@@ -48,6 +52,14 @@ def ensure_drive_credentials():
     creds = st.session_state.get("drive_credentials")
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
+        st.session_state.drive_credentials = creds
+
+    creds = st.session_state.get("drive_credentials")
+    if creds and getattr(creds, "valid", False):
+        st.session_state.is_google_authenticated = True
+    elif not creds:
+        st.session_state.is_google_authenticated = False
+
     return st.session_state.get("drive_credentials")
 
 
@@ -78,41 +90,6 @@ def upload_file_to_drive(uploaded_file, folder_id: Optional[str] = None) -> dict
         .execute()
     )
 
-st.set_page_config(page_title="Chat Demo", page_icon="💬", layout="wide")
-
-st.title("Chat Demo")
-
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
-    ]
-
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-if prompt := st.chat_input("メッセージを入力してください"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    response = "すみません、まだ応答ロジックを実装していません。"
-    st.session_state.messages.append({"role": "assistant", "content": response})
-    with st.chat_message("assistant"):
-        st.markdown(response)
-
-st.subheader("Google Drive アップロード")
-
-if "drive_credentials" not in st.session_state:
-    st.session_state.drive_credentials = None
-
-if "drive_auth_flow" not in st.session_state:
-    st.session_state.drive_auth_flow = None
-
-if "drive_auth_url" not in st.session_state:
-    st.session_state.drive_auth_url = None
-
-
 def start_oauth_flow():
     client_config = _get_oauth_client_config()
     flow = InstalledAppFlow.from_client_config(client_config, DRIVE_SCOPES)
@@ -132,55 +109,175 @@ def complete_oauth_flow(auth_code: str):
         flow.fetch_token(code=auth_code)
     except Exception as exc:  # noqa: BLE001
         st.error(f"認証に失敗しました: {exc}")
+        st.session_state.is_google_authenticated = False
     else:
         st.session_state.drive_credentials = flow.credentials
         st.session_state.drive_auth_flow = None
         st.session_state.drive_auth_url = None
-        st.success("Google Drive との接続が完了しました。")
+        st.session_state.is_google_authenticated = True
+        st.session_state.show_drive_uploader = False
+        st.rerun()
+
+# Dify周りの設定
 
 
-creds = ensure_drive_credentials()
+def _get_dify_config():
+    if "dify" not in st.secrets:
+        raise ValueError("Dify API の設定が secrets.toml にありません")
+    conf = st.secrets["dify"]
+    api_key = conf.get("api_key")
+    if not api_key:
+        raise ValueError("Dify API キーが設定されていません")
+    base_url = conf.get("base_url", "https://api.dify.ai").rstrip("/")
+    user_identifier = conf.get("user", "streamlit-user")
+    return api_key, base_url, user_identifier
 
-if not creds:
-    st.info("Google Drive へアップロードするには、Google アカウントの認証が必要です。")
-    if st.button("Google アカウントと連携", key="start-drive-auth"):
-        try:
-            start_oauth_flow()
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"認証フローを開始できませんでした: {exc}")
 
-    if st.session_state.get("drive_auth_url"):
-        st.markdown(
-            f"1. [こちらのリンク]({st.session_state.drive_auth_url}) を開いてアクセスを許可してください。\n"
-            "2. 表示された認証コードを以下に貼り付けて送信してください。"
-        )
-        with st.form("drive-auth-form"):
-            auth_code = st.text_input("認証コード", key="drive-auth-code")
-            submitted = st.form_submit_button("認証コードを送信")
-        if submitted and auth_code:
-            complete_oauth_flow(auth_code.strip())
-elif creds:
-    st.success("Google Drive に接続されています。")
-    if st.button("Google アカウントの連携を解除", key="reset-drive-auth"):
+def call_dify(prompt: str) -> str:
+    api_key, base_url, user_identifier = _get_dify_config()
+    conversation_id = st.session_state.get("dify_conversation_id")
+
+    payload = {
+        "inputs": {},
+        "query": prompt,
+        "response_mode": "blocking",
+        "user": user_identifier,
+    }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(
+        f"{base_url}/v1/chat-messages",
+        json=payload,
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    if new_conversation_id := data.get("conversation_id"):
+        st.session_state.dify_conversation_id = new_conversation_id
+
+    answer = data.get("answer")
+    if not answer:
+        raise ValueError("Dify から応答が取得できませんでした")
+    return answer
+
+def main_ui():
+    st.set_page_config(page_title="Chat Demo", page_icon="💬", layout="wide")
+    st.title("Chat Demo")
+
+
+    if "drive_credentials" not in st.session_state:
         st.session_state.drive_credentials = None
+
+    if "drive_auth_flow" not in st.session_state:
         st.session_state.drive_auth_flow = None
+
+    if "drive_auth_url" not in st.session_state:
         st.session_state.drive_auth_url = None
-        st.info("Google アカウントの連携を解除しました。必要であれば再度認証してください。")
 
+    if "is_google_authenticated" not in st.session_state:
+        st.session_state.is_google_authenticated = False
 
-uploaded_file = st.file_uploader("Google Drive にアップロードするファイルを選択してください", key="drive-uploader")
+    if "show_drive_uploader" not in st.session_state:
+        st.session_state.show_drive_uploader = False
 
-if uploaded_file and ensure_drive_credentials():
-    drive_folder_id = st.secrets.get("google_drive", {}).get("folder_id")
+    creds = ensure_drive_credentials()
 
-    if st.button("アップロードを実行", type="primary"):
-        try:
-            result = upload_file_to_drive(uploaded_file, folder_id=drive_folder_id)
-        except Exception as exc:  # noqa: BLE001 - Streamlit surface for user feedback
-            st.error(f"アップロードに失敗しました: {exc}")
+    if not creds:
+        st.info("Google Drive へアップロードするには、Google アカウントの認証が必要です。")
+        if not st.session_state.is_google_authenticated and st.button("Google アカウントと連携", key="start-drive-auth"):
+            try:
+                start_oauth_flow()
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"認証フローを開始できませんでした: {exc}")
+
+        if st.session_state.get("drive_auth_url"):
+            st.markdown(
+                f"1. [こちらのリンク]({st.session_state.drive_auth_url}) を開いてアクセスを許可してください。\n"
+                "2. 表示された認証コードを以下に貼り付けて送信してください。"
+            )
+            with st.form("drive-auth-form"):
+                auth_code = st.text_input("認証コード", key="drive-auth-code")
+                submitted = st.form_submit_button("認証コードを送信")
+            if submitted and auth_code:
+                complete_oauth_flow(auth_code.strip())
+    else:
+        st.success("Google Drive に接続されています。")
+        if st.button("Google アカウントの連携を解除", key="reset-drive-auth"):
+            st.session_state.drive_credentials = None
+            st.session_state.drive_auth_flow = None
+            st.session_state.drive_auth_url = None
+            st.session_state.is_google_authenticated = False
+            st.session_state.show_drive_uploader = False
+            st.info("Google アカウントの連携を解除しました。必要であれば再度認証してください。")
+        if not st.session_state.show_drive_uploader:
+            if st.button("アップロードフォームを表示", key="toggle-drive-upload-show"):
+                st.session_state.show_drive_uploader = True
+                st.rerun()
         else:
-            link = result.get("webViewLink")
-            if link:
-                st.success(f"アップロード完了: [{result['name']}]({link})")
+            if st.button("アップロードフォームを閉じる", key="toggle-drive-upload-hide"):
+                st.session_state.show_drive_uploader = False
+                st.rerun()
+            uploaded_file = st.file_uploader(
+                "Google Drive にアップロードするファイルを選択してください",
+                key="drive-uploader",
+            )
+
+            if uploaded_file and ensure_drive_credentials():
+                drive_folder_id = st.secrets.get("google_drive", {}).get("folder_id")
+
+                if st.button("アップロードを実行", type="primary"):
+                    try:
+                        result = upload_file_to_drive(uploaded_file, folder_id=drive_folder_id)
+                    except Exception as exc:  # noqa: BLE001 - Streamlit surface for user feedback
+                        st.error(f"アップロードに失敗しました: {exc}")
+                    else:
+                        link = result.get("webViewLink")
+                        if link:
+                            st.success(f"アップロード完了: [{result['name']}]({link})")
+                        else:
+                            st.success(f"アップロード完了。ファイルID: {result['id']}")
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
+        ]
+
+    if "dify_conversation_id" not in st.session_state:
+        st.session_state.dify_conversation_id = None
+
+    if st.button("会話をリセット", key="reset-conversastion"):
+        st.session_state.messages = [
+            {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
+        ]
+        st.session_state.dify_conversation_id = None
+        st.rerun()
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("メッセージを入力してください"):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        with st.chat_message("assistant"):
+            try:
+                with st.spinner("Dify から応答を取得しています..."):
+                    response = call_dify(prompt)
+            except Exception as exc:  # noqa: BLE001 - surface API errors to user
+                error_message = f"応答の取得に失敗しました: {exc}"
+                st.session_state.messages.append({"role": "assistant", "content": error_message})
+                st.error(error_message)
             else:
-                st.success(f"アップロード完了。ファイルID: {result['id']}")
+                st.session_state.messages.append({"role": "assistant", "content": response})
+                st.markdown(response)
+
+
+main_ui()
