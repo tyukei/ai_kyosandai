@@ -202,6 +202,12 @@ def stream_dify(prompt: str):
                     accumulated_answer += delta
             elif isinstance(chunk.get("answer"), str):
                 answer_full = chunk["answer"]
+                if not answer_full:
+                    print(
+                        "[DIFY DEBUG] skip empty answer chunk",
+                        flush=True,
+                    )
+                    continue
                 if answer_full.startswith(accumulated_answer):
                     delta = answer_full[len(accumulated_answer) :]
                 else:
@@ -210,12 +216,32 @@ def stream_dify(prompt: str):
             elif isinstance(chunk.get("message"), dict):
                 message = chunk["message"]
                 answer_full = message.get("answer") if isinstance(message.get("answer"), str) else ""
+                if not answer_full:
+                    print(
+                        "[DIFY DEBUG] skip empty message answer chunk",
+                        flush=True,
+                    )
+                    continue
                 if answer_full:
                     if answer_full.startswith(accumulated_answer):
                         delta = answer_full[len(accumulated_answer) :]
                     else:
                         delta = answer_full
                     accumulated_answer = answer_full
+
+            answer_str = chunk["answer"] if isinstance(chunk.get("answer"), str) else None
+            message_obj = chunk.get("message") if isinstance(chunk.get("message"), dict) else None
+            message_answer_str = (
+                message_obj.get("answer") if isinstance(message_obj.get("answer"), str) else None
+            ) if message_obj else None
+            print(
+                "[DIFY DEBUG] event="
+                f"{chunk.get('event')} delta_len={len(delta) if delta else 0} "
+                f"answer_len={len(answer_str) if answer_str is not None else 'None'} "
+                f"message_answer_len={len(message_answer_str) if message_answer_str is not None else 'None'} "
+                f"accumulated_len={len(accumulated_answer)}",
+                flush=True,
+            )
 
             if delta:
                 yield delta
