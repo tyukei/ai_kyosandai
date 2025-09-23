@@ -255,10 +255,32 @@ def main_ui():
 
     with st.sidebar:
         st.subheader("Dify オプション")
+        creds_for_sidebar = st.session_state.get("drive_credentials")
+        if creds_for_sidebar:
+            uploaded_dify_file = st.file_uploader(
+                "Dify 用ファイルを Google Drive にアップロード",
+                key="sidebar-dify-uploader",
+                help="アップロード後のファイルIDが自動で設定されます。",
+            )
+            if uploaded_dify_file and st.button("ファイルをアップロード", key="sidebar-dify-upload-btn"):
+                try:
+                    drive_folder_id = st.secrets.get("google_drive", {}).get("folder_id")
+                    result = upload_file_to_drive(uploaded_dify_file, folder_id=drive_folder_id)
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"アップロードに失敗しました: {exc}")
+                else:
+                    file_id = result.get("id")
+                    if file_id:
+                        st.session_state.dify_file_id = file_id
+                        st.success("Google Drive にアップロードしました。file_id を更新しました。")
+        else:
+            st.info("Google Drive 認証後にファイルをアップロードできます。")
+
         st.text_input(
-            "file_id (任意)",
-            key="dify_file_id",
-            help="Google Drive などにアップロード済みのファイルID。設定すると RAG 用入力として渡されます。",
+            "現在の file_id",
+            value=st.session_state.get("dify_file_id", ""),
+            help="Dify へ渡すファイルIDです。",
+            disabled=True,
         )
         st.selectbox(
             "is_rag (任意)",
@@ -276,10 +298,13 @@ def main_ui():
             st.session_state.messages = [
                 {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
             ]
-            st.session_state.dify_conversation_id = None
-            st.session_state.dify_file_id = ""
-            st.session_state.dify_is_rag = ""
-            st.session_state.dify_system_prompt = ""
+            for key in (
+                "dify_conversation_id",
+                "dify_file_id",
+                "dify_is_rag",
+                "dify_system_prompt",
+            ):
+                st.session_state.pop(key, None)
             st.rerun()
 
         st.markdown("---")
