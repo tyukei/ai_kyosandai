@@ -1,123 +1,120 @@
 import io
 import json
+import re
 from typing import Optional
 
 import streamlit as st
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+from google.api_core import exceptions as gcs_exceptions
+from google.cloud import storage
+from google.oauth2 import service_account
 import requests
 
 
-DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+def _get_gcs_config() -> dict:
+    if "gcs" not in st.secrets:
+        raise ValueError("Google Cloud Storage の設定が secrets.toml にありません")
 
+    gcs_conf = st.secrets["gcs"]
+    bucket_name = gcs_conf.get("bucket_name")
+    if not bucket_name:
+        raise ValueError("GCS バケット名が設定されていません")
 
-# google drive周りの設定
+    service_account_info = gcs_conf.get("service_account")
+    if not service_account_info:
+        raise ValueError("GCS の service_account 情報が設定されていません")
 
+    if isinstance(service_account_info, str):
+        try:
+            service_account_info = json.loads(service_account_info)
+        except json.JSONDecodeError as exc:
+            raise ValueError("service_account は JSON 文字列または辞書で指定してください") from exc
 
-def _get_oauth_client_config() -> dict:
-    if "google_oauth" not in st.secrets:
-        raise ValueError("OAuth クライアント情報が secrets.toml に設定されていません")
+    project_id = gcs_conf.get("project_id")
+    upload_prefix = gcs_conf.get("upload_prefix")
+    if isinstance(upload_prefix, str):
+        upload_prefix = upload_prefix.strip().strip("/")
+        if not upload_prefix:
+            upload_prefix = None
+    else:
+        upload_prefix = None
 
-    oauth_conf = st.secrets["google_oauth"]
-    required_keys = ("client_id", "client_secret", "project_id")
-    missing = [key for key in required_keys if key not in oauth_conf]
-    if missing:
-        raise ValueError(f"OAuth クライアント情報が不足しています: {', '.join(missing)}")
+    make_public = gcs_conf.get("make_public", False)
+    if isinstance(make_public, str):
+        make_public = make_public.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        make_public = bool(make_public)
 
-    redirect_uris = oauth_conf.get("redirect_uris")
-    if not redirect_uris:
-        redirect_uri = oauth_conf.get("redirect_uri", "urn:ietf:wg:oauth:2.0:oob")
-        redirect_uris = [redirect_uri]
-    elif isinstance(redirect_uris, str):
-        redirect_uris = [redirect_uris]
+    predefined_acl = gcs_conf.get("predefined_acl")
+    if isinstance(predefined_acl, str) and not predefined_acl.strip():
+        predefined_acl = None
 
     return {
-        "installed": {
-            "client_id": oauth_conf["client_id"],
-            "project_id": oauth_conf["project_id"],
-            "auth_uri": oauth_conf.get("auth_uri", "https://accounts.google.com/o/oauth2/auth"),
-            "token_uri": oauth_conf.get("token_uri", "https://oauth2.googleapis.com/token"),
-            "auth_provider_x509_cert_url": oauth_conf.get(
-                "auth_provider_x509_cert_url",
-                "https://www.googleapis.com/oauth2/v1/certs",
-            ),
-            "client_secret": oauth_conf["client_secret"],
-            "redirect_uris": redirect_uris,
-        }
+        "bucket_name": bucket_name,
+        "project_id": project_id,
+        "service_account": service_account_info,
+        "upload_prefix": upload_prefix,
+        "make_public": make_public,
+        "predefined_acl": predefined_acl,
     }
 
 
-def ensure_drive_credentials():
-    creds = st.session_state.get("drive_credentials")
-    if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        st.session_state.drive_credentials = creds
-
-    creds = st.session_state.get("drive_credentials")
-    if creds and getattr(creds, "valid", False):
-        st.session_state.is_google_authenticated = True
-    elif not creds:
-        st.session_state.is_google_authenticated = False
-
-    return st.session_state.get("drive_credentials")
+def _build_gcs_client(gcs_conf: dict) -> storage.Client:
+    credentials = service_account.Credentials.from_service_account_info(gcs_conf["service_account"])
+    project_id = gcs_conf["project_id"] or getattr(credentials, "project_id", None)
+    if not project_id:
+        raise ValueError("GCS の project_id が特定できません")
+    return storage.Client(project=project_id, credentials=credentials)
 
 
-def build_drive_service():
-    creds = ensure_drive_credentials()
-    if not creds:
-        raise ValueError("認証が完了していません")
-    return build("drive", "v3", credentials=creds)
+def upload_file_to_gcs(uploaded_file, *, destination_name: Optional[str] = None) -> dict:
+    """Upload an in-memory Streamlit file to Google Cloud Storage and return its metadata."""
+    gcs_conf = _get_gcs_config()
+    client = _build_gcs_client(gcs_conf)
+    bucket = client.bucket(gcs_conf["bucket_name"])
 
-
-def upload_file_to_drive(uploaded_file, folder_id: Optional[str] = None) -> dict:
-    """Upload an in-memory Streamlit file to Google Drive and return its metadata."""
-    service = build_drive_service()
-    body = {"name": uploaded_file.name}
-    if folder_id:
-        body["parents"] = [folder_id]
+    blob_name = destination_name or uploaded_file.name
+    if gcs_conf["upload_prefix"]:
+        blob_name = f"{gcs_conf['upload_prefix']}/{blob_name}"
 
     file_bytes = uploaded_file.getvalue()
-    media = MediaIoBaseUpload(
-        io.BytesIO(file_bytes),
-        mimetype=uploaded_file.type or "application/octet-stream",
-        resumable=False,
-    )
+    buffer = io.BytesIO(file_bytes)
+    buffer.seek(0)
 
-    return (
-        service.files()
-        .create(body=body, media_body=media, fields="id, name, webViewLink")
-        .execute()
-    )
+    blob = bucket.blob(blob_name)
+    upload_kwargs = {
+        "size": len(file_bytes),
+        "content_type": uploaded_file.type or "application/octet-stream",
+        "rewind": True,
+    }
+    if gcs_conf["predefined_acl"]:
+        upload_kwargs["predefined_acl"] = gcs_conf["predefined_acl"]
 
-def start_oauth_flow():
-    client_config = _get_oauth_client_config()
-    flow = InstalledAppFlow.from_client_config(client_config, DRIVE_SCOPES)
-    redirect_uris = client_config["installed"].get("redirect_uris") or ["urn:ietf:wg:oauth:2.0:oob"]
-    flow.redirect_uri = redirect_uris[0]
-    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline", include_granted_scopes="true")
-    st.session_state.drive_auth_flow = flow
-    st.session_state.drive_auth_url = auth_url
+    blob.upload_from_file(buffer, **upload_kwargs)
 
+    result = {
+        "bucket": gcs_conf["bucket_name"],
+        "blob_name": blob_name,
+        "gs_uri": f"gs://{gcs_conf['bucket_name']}/{blob_name}",
+    }
+    if gcs_conf["make_public"]:
+        try:
+            blob.make_public()
+        except gcs_exceptions.GoogleAPICallError as exc:
+            result[
+                "public_url_error"
+            ] = (
+                "Uniform bucket-level access が有効なバケットでは ACL による公開設定が行えません。"
+                " secrets.toml の make_public を false に設定するか、バケット設定を見直してください。"
+                f" (詳細: {exc})"
+            )
+        except Exception as exc:  # noqa: BLE001
+            result[
+                "public_url_error"
+            ] = f"公開URLの作成に失敗しました: {exc}. make_public を false に設定することで回避できます。"
+        else:
+            result["public_url"] = blob.public_url
 
-def complete_oauth_flow(auth_code: str):
-    flow = st.session_state.get("drive_auth_flow")
-    if not flow:
-        st.error("セッションが切れました。最初からやり直してください。")
-        return
-    try:
-        flow.fetch_token(code=auth_code)
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"認証に失敗しました: {exc}")
-        st.session_state.is_google_authenticated = False
-    else:
-        st.session_state.drive_credentials = flow.credentials
-        st.session_state.drive_auth_flow = None
-        st.session_state.drive_auth_url = None
-        st.session_state.is_google_authenticated = True
-        st.session_state.show_drive_uploader = False
-        st.rerun()
+    return result
 
 # Dify周りの設定
 
@@ -176,6 +173,69 @@ def stream_dify(prompt: str):
         response.raise_for_status()
 
         accumulated_answer = ""
+        last_error_message = ""
+
+        def _extract_text_payload(payload: object) -> str:
+            """Return a human-friendly string extracted from workflow outputs."""
+            candidates: list[str] = []
+
+            def _collect(obj: object) -> None:
+                if isinstance(obj, str):
+                    text = obj.strip()
+                    if text:
+                        candidates.append(text)
+                    return
+                if isinstance(obj, list):
+                    for item in obj:
+                        _collect(item)
+                    return
+                if isinstance(obj, dict):
+                    # Prefer explicit value fields first
+                    value_fields = (
+                        obj.get("value"),
+                        obj.get("answer"),
+                        obj.get("result"),
+                        obj.get("output_text"),
+                        obj.get("text"),
+                        obj.get("content"),
+                        obj.get("message"),
+                        obj.get("data"),
+                    )
+                    for field in value_fields:
+                        if field is not None:
+                            _collect(field)
+                    # Fall back to any remaining values
+                    for key, value in obj.items():
+                        if key in {"value", "answer", "result", "output_text", "text", "content", "message", "data"}:
+                            continue
+                        _collect(value)
+
+            _collect(payload)
+
+            meaningful: list[str] = []
+            for text in candidates:
+                lowered = text.lower()
+                if lowered in {"true", "false"}:
+                    continue
+                if text == user_identifier:
+                    continue
+                if text.startswith("IF/ELSE "):
+                    continue
+                if text.endswith("succeeded"):
+                    continue
+                if text.startswith("Variable Assigner"):
+                    continue
+                if re.fullmatch(r"[0-9a-f]{16,}", text.replace("-", "")):
+                    continue
+                meaningful.append(text)
+
+            for text in reversed(meaningful):
+                return text
+
+            filtered_candidates = [
+                text for text in candidates if not text.startswith("IF/ELSE ")
+            ]
+            return filtered_candidates[-1] if filtered_candidates else (candidates[-1] if candidates else "")
 
         for raw_line in response.iter_lines(decode_unicode=True):
             if not raw_line:
@@ -228,6 +288,32 @@ def stream_dify(prompt: str):
                     else:
                         delta = answer_full
                     accumulated_answer = answer_full
+            else:
+                event = chunk.get("event")
+                data_section = chunk.get("data") if isinstance(chunk.get("data"), dict) else None
+                if data_section:
+                    outputs_text = _extract_text_payload(data_section.get("outputs"))
+                    if not outputs_text:
+                        outputs_text = _extract_text_payload(data_section)
+                    if outputs_text:
+                        if outputs_text.startswith(accumulated_answer):
+                            delta = outputs_text[len(accumulated_answer) :]
+                        else:
+                            delta = outputs_text
+                        accumulated_answer = outputs_text
+                if event == "error":
+                    last_error_message = (
+                        chunk.get("message")
+                        or chunk.get("error")
+                        or _extract_text_payload(chunk.get("data"))
+                        or "Dify からエラー応答を受信しました"
+                    )
+                    print(
+                        "[DIFY DEBUG] error_event "
+                        f"message={last_error_message}",
+                        flush=True,
+                    )
+                    break
 
             answer_str = chunk["answer"] if isinstance(chunk.get("answer"), str) else None
             message_obj = chunk.get("message") if isinstance(chunk.get("message"), dict) else None
@@ -247,24 +333,27 @@ def stream_dify(prompt: str):
                 yield delta
 
         if not accumulated_answer:
+            if last_error_message:
+                raise ValueError(last_error_message)
             raise ValueError("Dify から応答が取得できませんでした")
 
 def main_ui():
-    st.set_page_config(page_title="Chat Demo", page_icon="💬", layout="wide")
-    st.title("Chat Demo")
+    st.set_page_config(page_title="Pivot AI", page_icon="💬", layout="wide")
+    st.title("Pivot AI")
 
-    if "drive_credentials" not in st.session_state:
-        st.session_state.drive_credentials = None
-    if "drive_auth_flow" not in st.session_state:
-        st.session_state.drive_auth_flow = None
-    if "drive_auth_url" not in st.session_state:
-        st.session_state.drive_auth_url = None
-    if "is_google_authenticated" not in st.session_state:
-        st.session_state.is_google_authenticated = False
-    if "show_drive_uploader" not in st.session_state:
-        st.session_state.show_drive_uploader = False
-
-    creds = ensure_drive_credentials()
+    gcs_config_error: Optional[str] = None
+    gcs_bucket_uri: Optional[str] = None
+    try:
+        gcs_conf_for_display = _get_gcs_config()
+    except Exception as exc:  # noqa: BLE001
+        gcs_config_error = str(exc)
+    else:
+        bucket_name = gcs_conf_for_display["bucket_name"]
+        prefix = gcs_conf_for_display.get("upload_prefix")
+        if prefix:
+            gcs_bucket_uri = f"gs://{bucket_name}/{prefix}/"
+        else:
+            gcs_bucket_uri = f"gs://{bucket_name}/"
 
     if "messages" not in st.session_state:
         st.session_state.messages = [
@@ -281,33 +370,6 @@ def main_ui():
 
     with st.sidebar:
         st.subheader("Dify オプション")
-        creds_for_sidebar = st.session_state.get("drive_credentials")
-        if creds_for_sidebar:
-            uploaded_dify_file = st.file_uploader(
-                "Dify 用ファイルを Google Drive にアップロード",
-                key="sidebar-dify-uploader",
-                help="アップロード後のファイルIDが自動で設定されます。",
-            )
-            if uploaded_dify_file and st.button("ファイルをアップロード", key="sidebar-dify-upload-btn"):
-                try:
-                    drive_folder_id = st.secrets.get("google_drive", {}).get("folder_id")
-                    result = upload_file_to_drive(uploaded_dify_file, folder_id=drive_folder_id)
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"アップロードに失敗しました: {exc}")
-                else:
-                    file_id = result.get("id")
-                    if file_id:
-                        st.session_state.dify_file_id = file_id
-                        st.success("Google Drive にアップロードしました。file_id を更新しました。")
-        else:
-            st.info("Google Drive 認証後にファイルをアップロードできます。")
-
-        st.text_input(
-            "現在の file_id",
-            value=st.session_state.get("dify_file_id", ""),
-            help="Dify へ渡すファイルIDです。",
-            disabled=True,
-        )
         st.selectbox(
             "is_rag (任意)",
             options=["", "true"],
@@ -319,6 +381,31 @@ def main_ui():
             key="dify_system_prompt",
             help="モデルに渡すシステムプロンプトを上書きしたい場合に入力します。",
         )
+
+        st.markdown("---")
+        if gcs_config_error:
+            st.error(f"GCS 設定エラー: {gcs_config_error}")
+        else:
+            st.subheader("ファイルアップロード")
+            if gcs_bucket_uri:
+                st.caption(f"アップロード先: {gcs_bucket_uri}")
+            uploaded_sidebar_file = st.file_uploader(
+                "アップロードするファイルを選択してください",
+                key="sidebar-gcs-uploader",
+                help="ファイルを選択すると自動でアップロードします。",
+            )
+            if uploaded_sidebar_file:
+                try:
+                    result = upload_file_to_gcs(uploaded_sidebar_file)
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"アップロードに失敗しました: {exc}")
+                else:
+                    st.session_state.dify_file_id = result.get("gs_uri", "")
+                    st.success("アップロード完了")
+                    if result.get("public_url"):
+                        st.info("公開URL は GCS でご確認ください。")
+                    if result.get("public_url_error"):
+                        st.warning(result["public_url_error"])
 
         if st.button("会話をリセット", key="reset-conversastion"):
             st.session_state.messages = [
@@ -332,72 +419,6 @@ def main_ui():
             ):
                 st.session_state.pop(key, None)
             st.rerun()
-
-        st.markdown("---")
-        st.subheader("Google Drive 接続")
-        if not creds:
-            st.info("Google Drive と連携するには下のボタンから認証してください。")
-            if not st.session_state.is_google_authenticated and st.button("Google アカウントと連携", key="start-drive-auth"):
-                try:
-                    start_oauth_flow()
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"認証フローを開始できませんでした: {exc}")
-
-            if st.session_state.get("drive_auth_url"):
-                st.markdown(
-                    f"1. [こちらのリンク]({st.session_state.drive_auth_url}) を開いてアクセスを許可してください。\n"
-                    "2. 表示された認証コードを以下に貼り付けて送信してください。"
-                )
-                with st.form("drive-auth-form"):
-                    auth_code = st.text_input("認証コード", key="drive-auth-code")
-                    submitted = st.form_submit_button("認証コードを送信")
-                if submitted and auth_code:
-                    complete_oauth_flow(auth_code.strip())
-        else:
-            st.success("Google Drive に接続されています。")
-            if st.button("Google アカウントの連携を解除", key="reset-drive-auth"):
-                st.session_state.drive_credentials = None
-                st.session_state.drive_auth_flow = None
-                st.session_state.drive_auth_url = None
-                st.session_state.is_google_authenticated = False
-                st.session_state.show_drive_uploader = False
-                st.info("Google アカウントの連携を解除しました。必要であれば再度認証してください。")
-
-    creds = st.session_state.get("drive_credentials")
-
-    if creds:
-        if not st.session_state.show_drive_uploader:
-            if st.button("アップロードフォームを表示", key="toggle-drive-upload-show"):
-                st.session_state.show_drive_uploader = True
-                st.rerun()
-        else:
-            if st.button("アップロードフォームを閉じる", key="toggle-drive-upload-hide"):
-                st.session_state.show_drive_uploader = False
-                st.rerun()
-            uploaded_file = st.file_uploader(
-                "Google Drive にアップロードするファイルを選択してください",
-                key="drive-uploader",
-            )
-
-            if uploaded_file and ensure_drive_credentials():
-                drive_folder_id = st.secrets.get("google_drive", {}).get("folder_id")
-
-                if st.button("アップロードを実行", type="primary"):
-                    try:
-                        result = upload_file_to_drive(uploaded_file, folder_id=drive_folder_id)
-                    except Exception as exc:  # noqa: BLE001 - Streamlit surface for user feedback
-                        st.error(f"アップロードに失敗しました: {exc}")
-                    else:
-                        uploaded_file_id = result.get("id")
-                        if uploaded_file_id:
-                            st.session_state.dify_file_id = uploaded_file_id
-                        link = result.get("webViewLink")
-                        if link:
-                            st.success(f"アップロード完了: [{result['name']}]({link})")
-                        else:
-                            st.success(f"アップロード完了。ファイルID: {result['id']}")
-    else:
-        st.empty()
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
