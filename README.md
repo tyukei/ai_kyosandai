@@ -4,10 +4,12 @@ Pivot AI は、Dify Workflow と連携したチャット UI を Streamlit で提
 左サイドバーからアップロードしたファイルを Google Cloud Storage（GCS）へ保存し、そのファイル名や各種オプションを Dify 渡しながら会話を進められます。
 
 ## デモ
-- 動画: https://github.com/user-attachments/assets/72a4ca30-6cef-435e-a29d-967bb7c9fe3f
+
+https://github.com/user-attachments/assets/72a4ca30-6cef-435e-a29d-967bb7c9fe3f
+ 
 - Dify Workflow: https://cloud.dify.ai/app/7fb6487e-dad6-4723-8b7e-7f559e984821/workflow
-- GCS バケット（参考）: https://console.cloud.google.com/storage/browser/ai-pivot-chatagent-kyoto-sangyo-university/kyosandai
-- 元リポジトリ: https://github.com/tyukei/ai_kyosandai
+- GCS バケット: https://console.cloud.google.com/storage/browser/ai-pivot-chatagent-kyoto-sangyo-university/kyosandai
+- リポジトリ: https://github.com/tyukei/ai_kyosandai
 
 ## 主な機能
 - GCS バケットへのファイルアップロードと公開設定（オプション）
