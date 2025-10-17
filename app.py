@@ -1,6 +1,8 @@
 import io
 import json
+import os
 import re
+import subprocess
 from typing import Optional
 
 import streamlit as st
@@ -115,6 +117,30 @@ def upload_file_to_gcs(uploaded_file, *, destination_name: Optional[str] = None)
             result["public_url"] = blob.public_url
 
     return result
+
+
+def _get_app_version(default: str = "dev") -> str:
+    """Resolve app version from env or git metadata."""
+    env_version = os.getenv("APP_VERSION", "").strip()
+    if env_version:
+        return env_version
+
+    git_commands = (
+        ["git", "describe", "--tags", "--always"],
+        ["git", "rev-parse", "--short", "HEAD"],
+    )
+    for command in git_commands:
+        try:
+            version = subprocess.check_output(command, stderr=subprocess.DEVNULL, text=True).strip()
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+        if version:
+            return version
+
+    return default
+
+
+APP_VERSION = _get_app_version()
 
 # Dify周りの設定
 
@@ -555,7 +581,7 @@ def main_ui():
             ):
                 st.session_state.pop(key, None)
             st.rerun()
-        st.text("v0.1.1")
+        st.text(f"バージョン: {APP_VERSION}")
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):

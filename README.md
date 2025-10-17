@@ -75,14 +75,15 @@ streamlit run app.py
 - `is_rag` や `system_prompt` を設定すると、その値が Dify Workflow の `inputs` に渡されます。
 - チャット入力欄にメッセージを送信すると、Dify からのストリーミング応答が表示されます。
 - 「会話をリセット」ボタンでセッション状態（会話履歴、ファイル ID、オプション）が初期化されます。
+- サイドバー下部のバージョン表示は `APP_VERSION` 環境変数があればその値を、未設定の場合は `git describe --tags --always`（失敗時はコミット SHA）を表示します。
 
 ## デプロイ（Streamlit Community Cloud）
 1. リポジトリを Streamlit Community Cloud にデプロイ対象として指定します。
 2. Cloud 側の「Secrets」設定画面にローカルと同じ TOML 形式でシークレットを貼り付けます。
 3. GCS バケットが外部アクセスを許可しているか、必要なら CORS 設定を確認してください。
+4. 任意で `APP_VERSION` 環境変数を設定すると、アプリ内のバージョン表示に反映されます（未設定でも Git メタデータで自動表示されます）。
 
 ## トラブルシューティング
 - `GCS の設定が secrets.toml にありません`: `.streamlit/secrets.toml` が配置されているか、`[gcs]` セクションが正しく設定されているか確認します。
 - `Uniform bucket-level access が有効なバケットでは ACL による公開設定が行えません`: `make_public = false` にするか、バケットのアクセス制御ポリシーを変更します。
 - Dify から応答が返らない場合: API キーの権限、Workflow の状態、`base_url` の URL が正しいか確認します。
-
