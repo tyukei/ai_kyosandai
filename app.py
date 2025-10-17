@@ -554,6 +554,7 @@ def main_ui():
             ):
                 st.session_state.pop(key, None)
             st.rerun()
+        st.text("v0.1.1")
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
