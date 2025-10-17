@@ -530,12 +530,13 @@ def main_ui():
                 help="ファイルを選択すると自動でアップロードします。",
             )
             if uploaded_sidebar_file:
+                print("[DEBUG] uploading file to GCS:", uploaded_sidebar_file.name)
                 try:
                     result = upload_file_to_gcs(uploaded_sidebar_file)
                 except Exception as exc:  # noqa: BLE001
                     st.error(f"アップロードに失敗しました: {exc}")
                 else:
-                    st.session_state.dify_file_id = result.get("gs_uri", "")
+                    st.session_state.dify_file_id = uploaded_sidebar_file.name
                     st.success("アップロード完了")
                     if result.get("public_url"):
                         st.info("公開URL は GCS でご確認ください。")
