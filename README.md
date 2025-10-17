@@ -14,6 +14,8 @@ https://github.com/user-attachments/assets/72a4ca30-6cef-435e-a29d-967bb7c9fe3f
 - リポジトリ: https://github.com/tyukei/ai_kyosandai
 
 ## 主な機能
+<img width="1424" height="677" alt="image" src="https://github.com/user-attachments/assets/073cf833-36f2-4640-bb6c-d9658fd3863b" />
+
 - GCS バケットへのファイルアップロードと公開設定（オプション）
 - Dify Workflow とのストリーミング連携によるチャット UI
 - 会話リセットや system prompt・RAG フラグなどのオプション指定
