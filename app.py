@@ -535,7 +535,6 @@ def main_ui():
             help="モデルに渡すシステムプロンプトを上書きしたい場合に入力します。",
         )
 
-        st.markdown("---")
         if gcs_config_error:
             st.error(f"GCS 設定エラー: {gcs_config_error}")
         else:
@@ -571,6 +570,10 @@ def main_ui():
             ):
                 st.session_state.pop(key, None)
             st.rerun()
+        st.markdown(
+            "[バグレポートはこちら](https://forms.gle/4EBnjTLd68kFvAma7)",
+            help="Google Form で不具合を報告できます。",
+        )
         st.text(f"バージョン: {APP_VERSION}")
 
     for message in st.session_state.messages:
