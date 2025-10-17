@@ -503,18 +503,10 @@ def main_ui():
     st.title("Pivot AI")
 
     gcs_config_error: Optional[str] = None
-    gcs_bucket_uri: Optional[str] = None
     try:
-        gcs_conf_for_display = _get_gcs_config()
+        _get_gcs_config()
     except Exception as exc:  # noqa: BLE001
         gcs_config_error = str(exc)
-    else:
-        bucket_name = gcs_conf_for_display["bucket_name"]
-        prefix = gcs_conf_for_display.get("upload_prefix")
-        if prefix:
-            gcs_bucket_uri = f"gs://{bucket_name}/{prefix}/"
-        else:
-            gcs_bucket_uri = f"gs://{bucket_name}/"
 
     if "messages" not in st.session_state:
         st.session_state.messages = [
@@ -548,8 +540,6 @@ def main_ui():
             st.error(f"GCS 設定エラー: {gcs_config_error}")
         else:
             st.subheader("ファイルアップロード")
-            if gcs_bucket_uri:
-                st.caption(f"アップロード先: {gcs_bucket_uri}")
             uploaded_sidebar_file = st.file_uploader(
                 "アップロードするファイルを選択してください",
                 key="sidebar-gcs-uploader",
