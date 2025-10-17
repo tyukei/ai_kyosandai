@@ -174,6 +174,60 @@ def stream_dify(prompt: str):
 
         accumulated_answer = ""
         last_error_message = ""
+        prompt_stripped = prompt.strip()
+
+        def _contains_noise(text: str) -> bool:
+            if not text:
+                return False
+            lowered = text.lower()
+            if lowered in {"true", "false", "not empty"}:
+                return True
+            if prompt_stripped and lowered == prompt_stripped.lower():
+                return True
+            if "if/else" in lowered:
+                return True
+            if "variable assigner" in lowered:
+                return True
+            if "workflow_" in lowered:
+                return True
+            if lowered.endswith("succeeded"):
+                return True
+            if re.fullmatch(r"[0-9a-f]{16,}", lowered.replace("-", "")):
+                return True
+            if lowered.startswith("answer "):
+                return True
+            return False
+
+        def _strip_prompt_prefix(text: str) -> str:
+            if not text:
+                return ""
+            trimmed = text.lstrip()
+            if prompt_stripped and trimmed.startswith(prompt_stripped):
+                trimmed = trimmed[len(prompt_stripped) :].lstrip("：:、,。 \u3000")
+            return trimmed
+
+        def _is_meaningful_text(text: str) -> bool:
+            if not text:
+                return False
+            stripped = text.strip()
+            if not stripped:
+                return False
+            stripped = _strip_prompt_prefix(stripped)
+            if not stripped:
+                return False
+            if stripped == user_identifier:
+                return False
+            if prompt_stripped and stripped == prompt_stripped:
+                return False
+            if _contains_noise(stripped):
+                return False
+            if not (
+                re.search(r"\s", stripped)
+                or re.search(r"[。．！？!?]", stripped)
+                or re.search(r"[\u3000-\u303F\u3040-\u30ff\u4e00-\u9faf]", stripped)
+            ):
+                return False
+            return True
 
         def _extract_text_payload(payload: object) -> str:
             """Return a human-friendly string extracted from workflow outputs."""
@@ -210,32 +264,100 @@ def stream_dify(prompt: str):
                             continue
                         _collect(value)
 
+            def _dedupe_repeated_text(text: str) -> str:
+                if not text:
+                    return ""
+                stripped = text.strip()
+                if not stripped:
+                    return ""
+                # Check if the text is exactly the same repeated twice consecutively.
+                half = len(stripped) // 2
+                if len(stripped) % 2 == 0 and stripped[:half] == stripped[half:]:
+                    return _dedupe_repeated_text(stripped[:half])
+                # Remove duplicated sentences.
+                sentences = re.split(r"(?<=[。．！？!?])\s*", stripped)
+                filtered: list[str] = []
+                seen_sentences: set[str] = set()
+                for sentence in sentences:
+                    cleaned_sentence = sentence.strip()
+                    if not cleaned_sentence:
+                        continue
+                    if cleaned_sentence in seen_sentences:
+                        continue
+                    seen_sentences.add(cleaned_sentence)
+                    filtered.append(cleaned_sentence)
+                if filtered:
+                    return _strip_prompt_prefix("".join(filtered))
+                return _strip_prompt_prefix(stripped)
+
+            def _sanitize_text(text: str) -> str:
+                if not text:
+                    return ""
+                cleaned = text.strip()
+                cleaned = _strip_prompt_prefix(cleaned)
+                normalized = re.sub(r"(IF/ELSE)", r"\n\1", cleaned, flags=re.IGNORECASE)
+                normalized = re.sub(r"(Answer\s+\d+(?:\s*\([^)]+\))?)", r"\n\1", normalized, flags=re.IGNORECASE)
+                normalized = re.sub(r"(Variable Assigner)", r"\n\1", normalized, flags=re.IGNORECASE)
+                normalized = re.sub(r"(workflow_[^\s]*)", r"\n\1", normalized, flags=re.IGNORECASE)
+                lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+
+                def _strip_parenthetical(line: str) -> str:
+                    if "(" in line and ")" in line:
+                        prefix, suffix = line.split("(", 1)
+                        suffix_lower = suffix.lower()
+                        if prefix.strip() and any(
+                            marker in suffix_lower for marker in ("you can", "for example", "etc.", "例えば", "ｅｔｃ")
+                        ):
+                            return prefix.strip()
+                    return line
+
+                for line in lines:
+                    candidate = _strip_parenthetical(line)
+                    candidate = _strip_prompt_prefix(candidate)
+                    if candidate.lower().startswith("answer "):
+                        continue
+                    if _is_meaningful_text(candidate):
+                        return _dedupe_repeated_text(candidate)
+
+                for line in reversed(lines):
+                    candidate = _strip_parenthetical(line)
+                    candidate = _strip_prompt_prefix(candidate)
+                    if candidate.lower().startswith("answer "):
+                        continue
+                    if _is_meaningful_text(candidate):
+                        return _dedupe_repeated_text(candidate)
+
+                candidate = _strip_parenthetical(cleaned)
+                candidate = _strip_prompt_prefix(candidate)
+                return _dedupe_repeated_text(candidate) if _is_meaningful_text(candidate) else ""
+
             _collect(payload)
+            # Deduplicate candidates while preserving order.
+            unique_candidates: list[str] = []
+            seen_candidates: set[str] = set()
+            for item in candidates:
+                if item in seen_candidates:
+                    continue
+                seen_candidates.add(item)
+                unique_candidates.append(item)
+            candidates = unique_candidates
 
             meaningful: list[str] = []
             for text in candidates:
-                lowered = text.lower()
-                if lowered in {"true", "false"}:
-                    continue
-                if text == user_identifier:
-                    continue
-                if text.startswith("IF/ELSE "):
-                    continue
-                if text.endswith("succeeded"):
-                    continue
-                if text.startswith("Variable Assigner"):
-                    continue
-                if re.fullmatch(r"[0-9a-f]{16,}", text.replace("-", "")):
-                    continue
-                meaningful.append(text)
+                if _is_meaningful_text(text):
+                    meaningful.append(text)
 
             for text in reversed(meaningful):
-                return text
+                cleaned = _sanitize_text(text)
+                if cleaned:
+                    return cleaned
 
-            filtered_candidates = [
-                text for text in candidates if not text.startswith("IF/ELSE ")
-            ]
-            return filtered_candidates[-1] if filtered_candidates else (candidates[-1] if candidates else "")
+            for text in reversed(candidates):
+                cleaned = _sanitize_text(text)
+                if cleaned:
+                    return cleaned
+
+            return ""
 
         for raw_line in response.iter_lines(decode_unicode=True):
             if not raw_line:
@@ -257,16 +379,27 @@ def stream_dify(prompt: str):
 
             delta = ""
             if isinstance(chunk.get("answer_delta"), str):
-                delta = chunk["answer_delta"]
-                if delta:
-                    accumulated_answer += delta
+                delta_candidate = chunk["answer_delta"]
+                if not delta_candidate:
+                    continue
+                delta_candidate = _strip_prompt_prefix(delta_candidate)
+                if not delta_candidate or _contains_noise(delta_candidate):
+                    continue
+                delta_candidate = _dedupe_repeated_text(delta_candidate)
+                if not delta_candidate:
+                    continue
+                delta = delta_candidate
+                accumulated_answer += delta
             elif isinstance(chunk.get("answer"), str):
-                answer_full = chunk["answer"]
-                if not answer_full:
+                answer_full_raw = chunk["answer"]
+                if not answer_full_raw:
                     print(
                         "[DIFY DEBUG] skip empty answer chunk",
                         flush=True,
                     )
+                    continue
+                answer_full = _extract_text_payload(answer_full_raw)
+                if not answer_full:
                     continue
                 if answer_full.startswith(accumulated_answer):
                     delta = answer_full[len(accumulated_answer) :]
@@ -282,12 +415,14 @@ def stream_dify(prompt: str):
                         flush=True,
                     )
                     continue
-                if answer_full:
-                    if answer_full.startswith(accumulated_answer):
-                        delta = answer_full[len(accumulated_answer) :]
-                    else:
-                        delta = answer_full
-                    accumulated_answer = answer_full
+                answer_full = _extract_text_payload(answer_full)
+                if not answer_full:
+                    continue
+                if answer_full.startswith(accumulated_answer):
+                    delta = answer_full[len(accumulated_answer) :]
+                else:
+                    delta = answer_full
+                accumulated_answer = answer_full
             else:
                 event = chunk.get("event")
                 data_section = chunk.get("data") if isinstance(chunk.get("data"), dict) else None
