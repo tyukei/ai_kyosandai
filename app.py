@@ -542,7 +542,7 @@ def main_ui():
     if "dify_file_id" not in st.session_state:
         st.session_state.dify_file_id = ""
     if "dify_is_rag" not in st.session_state:
-        st.session_state.dify_is_rag = ""
+        st.session_state.dify_is_rag = "true"
     if "dify_system_prompt" not in st.session_state:
         st.session_state.dify_system_prompt = ""
 
@@ -550,9 +550,9 @@ def main_ui():
         st.subheader("Dify オプション")
         st.selectbox(
             "is_rag (任意)",
-            options=["", "true"],
+            options=["true", ""],
             key="dify_is_rag",
-            help="RAG を利用したい場合は 'true' を選択します。",
+            help="RAG を利用したい場合は 'true' を、利用しない場合は空を選択します。",
         )
         st.text_area(
             "system_prompt (任意)",
