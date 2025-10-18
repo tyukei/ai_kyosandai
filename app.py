@@ -163,6 +163,8 @@ def stream_dify(prompt: str):
 
     inputs: dict[str, object] = {}
 
+    prompt_stripped = prompt.strip()
+
     file_id = st.session_state.get("dify_file_id", "").strip()
     if file_id:
         inputs["file_id"] = file_id
@@ -174,6 +176,29 @@ def stream_dify(prompt: str):
     system_prompt = st.session_state.get("dify_system_prompt", "").strip()
     if system_prompt:
         inputs["system_prompt"] = system_prompt
+
+    history_lines: list[str] = []
+    for message in st.session_state.get("messages", []):
+        role = message.get("role", "").strip()
+        content = message.get("content", "")
+        if not role or not content:
+            continue
+        content_clean = " ".join(content.strip().splitlines())
+        if not content_clean:
+            continue
+        history_lines.append(f"{role}:{content_clean}")
+
+    if prompt_stripped and history_lines:
+        last_entry = history_lines[-1]
+        expected_last = f"user:{prompt_stripped}"
+        if last_entry == expected_last:
+            history_lines.pop()
+
+    if history_lines:
+        inputs["history"] = "\n".join(history_lines)
+        print("[DIFY DEBUG] conversation history:")
+        for line in history_lines:
+            print(f"  {line}")
 
     payload = {
         "inputs": inputs,
@@ -200,7 +225,7 @@ def stream_dify(prompt: str):
 
         accumulated_answer = ""
         last_error_message = ""
-        prompt_stripped = prompt.strip()
+        # prompt_stripped already computed earlier.
 
         def _contains_noise(text: str) -> bool:
             if not text:
