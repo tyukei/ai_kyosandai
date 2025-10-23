@@ -498,8 +498,8 @@ def stream_dify(prompt: str):
         raise ValueError("Dify から応答が取得できませんでした")
 
 def main_ui():
-    st.set_page_config(page_title="Pivot AI", page_icon="💬", layout="wide")
-    st.title("Pivot AI")
+    st.set_page_config(page_title="ピボットAI壁打ち君", page_icon="💬", layout="wide")
+    st.title("ピボットAI壁打ち君")
 
     gcs_config_error: Optional[str] = None
     try:
@@ -509,7 +509,7 @@ def main_ui():
 
     if "messages" not in st.session_state:
         st.session_state.messages = [
-            {"role": "assistant", "content": "こんにちは！ご質問はありますか？"}
+            {"role": "assistant", "content": "こんにちは！ピボットの知識を持ったAIです。起業やビジネスについて気軽に質問してください!"}
         ]
     if "dify_conversation_id" not in st.session_state:
         st.session_state.dify_conversation_id = None
@@ -521,7 +521,7 @@ def main_ui():
         st.session_state.dify_system_prompt = ""
 
     with st.sidebar:
-        st.subheader("Dify オプション")
+        st.subheader("AIオプション")
         st.selectbox(
             "is_rag (任意)",
             options=["true", ""],
@@ -587,7 +587,7 @@ def main_ui():
             response_container = st.empty()
             accumulated_response = ""
             try:
-                with st.spinner("Dify から応答を取得しています..."):
+                with st.spinner("AIから応答を取得しています..."):
                     for delta in stream_dify(prompt):
                         accumulated_response += delta
                         response_container.markdown(accumulated_response)
