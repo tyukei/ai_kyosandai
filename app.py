@@ -225,15 +225,6 @@ def stream_dify(prompt: str):
         "Accept": "text/event-stream",
     }
 
-    response = requests.post(
-        f"{base_url}/v1/chat-messages",
-        json=payload,
-        headers=headers,
-        timeout=(5, 120),
-        stream=True,
-    )
-    response.raise_for_status()
-
     def _contains_noise(text: str) -> bool:
         if not text:
             return False
@@ -392,6 +383,34 @@ def stream_dify(prompt: str):
                 return candidate
         return ""
 
+    def _blocking_request() -> str:
+        blocking_payload = dict(payload)
+        blocking_payload["response_mode"] = "blocking"
+        blocking_headers = dict(headers)
+        blocking_headers["Accept"] = "application/json"
+        try:
+            resp = requests.post(
+                f"{base_url}/v1/chat-messages",
+                json=blocking_payload,
+                headers=blocking_headers,
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except requests.exceptions.RequestException:
+            return ""
+        try:
+            data = resp.json()
+        except ValueError:
+            return ""
+        if conversation_id := data.get("conversation_id"):
+            st.session_state.dify_conversation_id = conversation_id
+        answer_text = ""
+        if isinstance(data.get("answer"), str):
+            answer_text = data["answer"]
+        if not answer_text:
+            answer_text = _first_text(data)
+        return _sanitize_text(answer_text)
+
     raw_buffer = ""
     cleaned_answer = ""
     last_error_message = ""
@@ -422,76 +441,110 @@ def stream_dify(prompt: str):
         raw_buffer = raw_text
         return _emit_cleaned()
 
-    for raw_line in response.iter_lines(decode_unicode=True):
-        if not raw_line:
-            continue
-        if not raw_line.startswith("data:"):
-            continue
-        data_str = raw_line[len("data:"):].strip()
-        if not data_str or data_str == "[DONE]":
-            continue
-        try:
-            chunk = json.loads(data_str)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(chunk, dict):
-            continue
-
-        if conversation_id := chunk.get("conversation_id"):
-            st.session_state.dify_conversation_id = conversation_id
-
-        delta = ""
-        if isinstance(chunk.get("answer_delta"), str):
-            raw_piece = _strip_prompt_prefix(chunk["answer_delta"])
-            if not raw_piece:
-                continue
-            delta = _append_raw(raw_piece)
-        elif isinstance(chunk.get("answer"), str):
-            raw_piece = chunk["answer"]
-            if not raw_piece.strip():
-                print("[DIFY DEBUG] skip empty answer chunk", flush=True)
-                continue
-            delta = _replace_raw(raw_piece)
-        elif isinstance(chunk.get("message"), dict):
-            message = chunk["message"]
-            raw_piece = _first_text(message.get("answer"))
-            if not raw_piece:
-                print("[DIFY DEBUG] skip empty message answer chunk", flush=True)
-                continue
-            delta = _replace_raw(raw_piece)
-        else:
-            event = chunk.get("event")
-            data_section = chunk.get("data") if isinstance(chunk.get("data"), dict) else None
-            if data_section and not cleaned_answer:
-                raw_piece = _first_text(data_section.get("outputs")) or _first_text(data_section)
-                if raw_piece:
-                    delta = _replace_raw(raw_piece)
-            if event == "error":
-                last_error_message = (
-                    _first_text(chunk.get("message"))
-                    or _first_text(chunk.get("error"))
-                    or _first_text(chunk.get("data"))
-                    or "Dify からエラー応答を受信しました"
-                )
-                print("[DIFY DEBUG] error_event message=%s" % last_error_message, flush=True)
-                break
-
-        answer_str = chunk["answer"] if isinstance(chunk.get("answer"), str) else None
-        message_obj = chunk.get("message") if isinstance(chunk.get("message"), dict) else None
-        message_answer_str = (
-            message_obj.get("answer") if isinstance(message_obj.get("answer"), str) else None
-        ) if message_obj else None
-        print(
-            "[DIFY DEBUG] event="
-            f"{chunk.get('event')} delta_len={len(delta) if delta else 0} "
-            f"answer_len={len(answer_str) if answer_str is not None else 'None'} "
-            f"message_answer_len={len(message_answer_str) if message_answer_str is not None else 'None'} "
-            f"accumulated_len={len(cleaned_answer)}",
-            flush=True,
+    try:
+        response = requests.post(
+            f"{base_url}/v1/chat-messages",
+            json=payload,
+            headers=headers,
+            timeout=(5, 120),
+            stream=True,
         )
-
-        if delta:
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        fallback_answer = _blocking_request()
+        if fallback_answer:
+            raw_buffer = fallback_answer
+            delta = fallback_answer
+            cleaned_answer = fallback_answer
             yield delta
+            return
+        raise ValueError("Dify への接続に失敗しました") from exc
+
+    try:
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            if not raw_line.startswith("data:"):
+                continue
+            data_str = raw_line[len("data:"):].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+
+            if conversation_id := chunk.get("conversation_id"):
+                st.session_state.dify_conversation_id = conversation_id
+
+            delta = ""
+            if isinstance(chunk.get("answer_delta"), str):
+                raw_piece = _strip_prompt_prefix(chunk["answer_delta"])
+                if not raw_piece:
+                    continue
+                delta = _append_raw(raw_piece)
+            elif isinstance(chunk.get("answer"), str):
+                raw_piece = chunk["answer"]
+                if not raw_piece.strip():
+                    print("[DIFY DEBUG] skip empty answer chunk", flush=True)
+                    continue
+                delta = _replace_raw(raw_piece)
+            elif isinstance(chunk.get("message"), dict):
+                message = chunk["message"]
+                raw_piece = _first_text(message.get("answer"))
+                if not raw_piece:
+                    print("[DIFY DEBUG] skip empty message answer chunk", flush=True)
+                    continue
+                delta = _replace_raw(raw_piece)
+            else:
+                event = chunk.get("event")
+                data_section = chunk.get("data") if isinstance(chunk.get("data"), dict) else None
+                if data_section and not cleaned_answer:
+                    raw_piece = _first_text(data_section.get("outputs")) or _first_text(data_section)
+                    if raw_piece:
+                        delta = _replace_raw(raw_piece)
+                if event == "error":
+                    last_error_message = (
+                        _first_text(chunk.get("message"))
+                        or _first_text(chunk.get("error"))
+                        or _first_text(chunk.get("data"))
+                        or "Dify からエラー応答を受信しました"
+                    )
+                    print("[DIFY DEBUG] error_event message=%s" % last_error_message, flush=True)
+                    break
+
+            answer_str = chunk["answer"] if isinstance(chunk.get("answer"), str) else None
+            message_obj = chunk.get("message") if isinstance(chunk.get("message"), dict) else None
+            message_answer_str = (
+                message_obj.get("answer") if isinstance(message_obj.get("answer"), str) else None
+            ) if message_obj else None
+            print(
+                "[DIFY DEBUG] event="
+                f"{chunk.get('event')} delta_len={len(delta) if delta else 0} "
+                f"answer_len={len(answer_str) if answer_str is not None else 'None'} "
+                f"message_answer_len={len(message_answer_str) if message_answer_str is not None else 'None'} "
+                f"accumulated_len={len(cleaned_answer)}",
+                flush=True,
+            )
+
+            if delta:
+                yield delta
+    except requests.exceptions.RequestException as exc:
+        fallback_answer = _blocking_request()
+        if fallback_answer:
+            delta = fallback_answer
+            if fallback_answer.startswith(cleaned_answer):
+                delta = fallback_answer[len(cleaned_answer) :]
+            raw_buffer = fallback_answer
+            cleaned_answer = fallback_answer
+            if delta:
+                yield delta
+            return
+        raise ValueError("Dify ストリーミング中に接続が中断されました") from exc
+    finally:
+        response.close()
 
     if not cleaned_answer:
         if last_error_message:
