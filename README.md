@@ -1,6 +1,6 @@
 # Pivot AI（Kyosandai GCS Uploader）
 
-https://aikyosandai-dev.streamlit.app
+https://aikyosandai.streamlit.app
 
 Pivot AI は、Dify Workflow と連携したチャット UI を Streamlit で提供するアプリです。  
 左サイドバーからアップロードしたファイルを Google Cloud Storage（GCS）へ保存し、そのファイル名や各種オプションを Dify 渡しながら会話を進められます。
