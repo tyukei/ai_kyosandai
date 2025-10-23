@@ -222,13 +222,14 @@ def stream_dify(prompt: str):
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "Accept": "text/event-stream",
     }
 
     response = requests.post(
         f"{base_url}/v1/chat-messages",
         json=payload,
         headers=headers,
-        timeout=30,
+        timeout=(5, 120),
         stream=True,
     )
     response.raise_for_status()
