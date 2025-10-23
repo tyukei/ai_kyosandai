@@ -88,3 +88,6 @@ streamlit run app.py
 - `GCS の設定が secrets.toml にありません`: `.streamlit/secrets.toml` が配置されているか、`[gcs]` セクションが正しく設定されているか確認します。
 - `Uniform bucket-level access が有効なバケットでは ACL による公開設定が行えません`: `make_public = false` にするか、バケットのアクセス制御ポリシーを変更します。
 - Dify から応答が返らない場合: API キーの権限、Workflow の状態、`base_url` の URL が正しいか確認します。
+- アプリが起動されず以下の画面が表示される場合: 「Yes get this app back up !」を選択し、アプリを起動させてください。、一定期間たつとサーバが停止するので、起動する必要があります。
+<img width="621" height="389" alt="image" src="https://github.com/user-attachments/assets/b2df8db5-0499-4daa-ba2d-1af758331ce6" />
+
