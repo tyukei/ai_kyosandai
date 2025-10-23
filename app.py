@@ -157,7 +157,7 @@ def _get_dify_config():
     return api_key, base_url, user_identifier
 
 
-def stream_dify(prompt: str):
+def fetch_dify_response(prompt: str) -> str:
     api_key, base_url, user_identifier = _get_dify_config()
     conversation_id = st.session_state.get("dify_conversation_id")
 
@@ -194,16 +194,26 @@ def stream_dify(prompt: str):
         if last_entry == expected_last:
             history_lines.pop()
 
+    history_prefixes: list[str] = []
     if history_lines:
         inputs["history"] = "\n".join(history_lines)
         print("[DIFY DEBUG] conversation history:")
         for line in history_lines:
             print(f"  {line}")
+            stripped_line = line.strip()
+            if not stripped_line:
+                continue
+            history_prefixes.append(stripped_line)
+            if ":" in stripped_line:
+                _, _, content_only = stripped_line.partition(":")
+                content_only = content_only.strip()
+                if content_only:
+                    history_prefixes.append(content_only)
 
     payload = {
         "inputs": inputs,
         "query": prompt,
-        "response_mode": "streaming",
+        "response_mode": "blocking",
         "user": user_identifier,
     }
     if conversation_id:
@@ -214,314 +224,231 @@ def stream_dify(prompt: str):
         "Content-Type": "application/json",
     }
 
-    with requests.post(
+    response = requests.post(
         f"{base_url}/v1/chat-messages",
         json=payload,
         headers=headers,
         timeout=30,
-        stream=True,
-    ) as response:
-        response.raise_for_status()
+    )
+    response.raise_for_status()
 
-        accumulated_answer = ""
-        last_error_message = ""
-        # prompt_stripped already computed earlier.
+    try:
+        payload_data = response.json()
+    except ValueError as exc:  # noqa: B904
+        raise ValueError("Dify からJSON以外の応答を受信しました") from exc
 
-        def _contains_noise(text: str) -> bool:
-            if not text:
-                return False
-            lowered = text.lower()
-            if lowered in {"true", "false", "not empty"}:
-                return True
-            if prompt_stripped and lowered == prompt_stripped.lower():
-                return True
-            if "if/else" in lowered:
-                return True
-            if "variable assigner" in lowered:
-                return True
-            if "workflow_" in lowered:
-                return True
-            if lowered.endswith("succeeded"):
-                return True
-            if re.fullmatch(r"[0-9a-f]{16,}", lowered.replace("-", "")):
-                return True
-            if lowered.startswith("answer "):
-                return True
+    if conversation_id := payload_data.get("conversation_id"):
+        st.session_state.dify_conversation_id = conversation_id
+
+    def _contains_noise(text: str) -> bool:
+        if not text:
             return False
-
-        def _strip_prompt_prefix(text: str) -> str:
-            if not text:
-                return ""
-            trimmed = text.lstrip()
-            if prompt_stripped and trimmed.startswith(prompt_stripped):
-                trimmed = trimmed[len(prompt_stripped) :].lstrip("：:、,。 \u3000")
-            return trimmed
-
-        def _is_meaningful_text(text: str) -> bool:
-            if not text:
-                return False
-            stripped = text.strip()
-            if not stripped:
-                return False
-            stripped = _strip_prompt_prefix(stripped)
-            if not stripped:
-                return False
-            if stripped == user_identifier:
-                return False
-            if prompt_stripped and stripped == prompt_stripped:
-                return False
-            if _contains_noise(stripped):
-                return False
-            if not (
-                re.search(r"\s", stripped)
-                or re.search(r"[。．！？!?]", stripped)
-                or re.search(r"[\u3000-\u303F\u3040-\u30ff\u4e00-\u9faf]", stripped)
-            ):
-                return False
+        lowered = text.lower()
+        if lowered in {"true", "false", "not empty"}:
             return True
+        if prompt_stripped and lowered == prompt_stripped.lower():
+            return True
+        if "if/else" in lowered:
+            return True
+        if "variable assigner" in lowered:
+            return True
+        if "workflow_" in lowered:
+            return True
+        if lowered.endswith("succeeded"):
+            return True
+        if re.fullmatch(r"[0-9a-f]{16,}", lowered.replace("-", "")):
+            return True
+        if lowered.startswith("answer "):
+            return True
+        if lowered.startswith("ragから情報抽出"):
+            return True
+        if lowered.startswith("イベント名"):
+            return True
+        if lowered.startswith("llm_回答生成_rag有り"):
+            return True
+        if re.fullmatch(r"回答\s*\(\d+\)", lowered):
+            return True
+        if lowered.startswith(";unnamed:"):
+            return True
+        return False
 
-        def _extract_text_payload(payload: object) -> str:
-            """Return a human-friendly string extracted from workflow outputs."""
-            candidates: list[str] = []
-
-            def _collect(obj: object) -> None:
-                if isinstance(obj, str):
-                    text = obj.strip()
-                    if text:
-                        candidates.append(text)
-                    return
-                if isinstance(obj, list):
-                    for item in obj:
-                        _collect(item)
-                    return
-                if isinstance(obj, dict):
-                    # Prefer explicit value fields first
-                    value_fields = (
-                        obj.get("value"),
-                        obj.get("answer"),
-                        obj.get("result"),
-                        obj.get("output_text"),
-                        obj.get("text"),
-                        obj.get("content"),
-                        obj.get("message"),
-                        obj.get("data"),
-                    )
-                    for field in value_fields:
-                        if field is not None:
-                            _collect(field)
-                    # Fall back to any remaining values
-                    for key, value in obj.items():
-                        if key in {"value", "answer", "result", "output_text", "text", "content", "message", "data"}:
-                            continue
-                        _collect(value)
-
-            def _dedupe_repeated_text(text: str) -> str:
-                if not text:
-                    return ""
-                stripped = text.strip()
-                if not stripped:
-                    return ""
-                # Check if the text is exactly the same repeated twice consecutively.
-                half = len(stripped) // 2
-                if len(stripped) % 2 == 0 and stripped[:half] == stripped[half:]:
-                    return _dedupe_repeated_text(stripped[:half])
-                # Remove duplicated sentences.
-                sentences = re.split(r"(?<=[。．！？!?])\s*", stripped)
-                filtered: list[str] = []
-                seen_sentences: set[str] = set()
-                for sentence in sentences:
-                    cleaned_sentence = sentence.strip()
-                    if not cleaned_sentence:
-                        continue
-                    if cleaned_sentence in seen_sentences:
-                        continue
-                    seen_sentences.add(cleaned_sentence)
-                    filtered.append(cleaned_sentence)
-                if filtered:
-                    return _strip_prompt_prefix("".join(filtered))
-                return _strip_prompt_prefix(stripped)
-
-            def _sanitize_text(text: str) -> str:
-                if not text:
-                    return ""
-                cleaned = text.strip()
-                cleaned = _strip_prompt_prefix(cleaned)
-                normalized = re.sub(r"(IF/ELSE)", r"\n\1", cleaned, flags=re.IGNORECASE)
-                normalized = re.sub(r"(Answer\s+\d+(?:\s*\([^)]+\))?)", r"\n\1", normalized, flags=re.IGNORECASE)
-                normalized = re.sub(r"(Variable Assigner)", r"\n\1", normalized, flags=re.IGNORECASE)
-                normalized = re.sub(r"(workflow_[^\s]*)", r"\n\1", normalized, flags=re.IGNORECASE)
-                lines = [line.strip() for line in normalized.splitlines() if line.strip()]
-
-                def _strip_parenthetical(line: str) -> str:
-                    if "(" in line and ")" in line:
-                        prefix, suffix = line.split("(", 1)
-                        suffix_lower = suffix.lower()
-                        if prefix.strip() and any(
-                            marker in suffix_lower for marker in ("you can", "for example", "etc.", "例えば", "ｅｔｃ")
-                        ):
-                            return prefix.strip()
-                    return line
-
-                for line in lines:
-                    candidate = _strip_parenthetical(line)
-                    candidate = _strip_prompt_prefix(candidate)
-                    if candidate.lower().startswith("answer "):
-                        continue
-                    if _is_meaningful_text(candidate):
-                        return _dedupe_repeated_text(candidate)
-
-                for line in reversed(lines):
-                    candidate = _strip_parenthetical(line)
-                    candidate = _strip_prompt_prefix(candidate)
-                    if candidate.lower().startswith("answer "):
-                        continue
-                    if _is_meaningful_text(candidate):
-                        return _dedupe_repeated_text(candidate)
-
-                candidate = _strip_parenthetical(cleaned)
-                candidate = _strip_prompt_prefix(candidate)
-                return _dedupe_repeated_text(candidate) if _is_meaningful_text(candidate) else ""
-
-            _collect(payload)
-            # Deduplicate candidates while preserving order.
-            unique_candidates: list[str] = []
-            seen_candidates: set[str] = set()
-            for item in candidates:
-                if item in seen_candidates:
-                    continue
-                seen_candidates.add(item)
-                unique_candidates.append(item)
-            candidates = unique_candidates
-
-            meaningful: list[str] = []
-            for text in candidates:
-                if _is_meaningful_text(text):
-                    meaningful.append(text)
-
-            for text in reversed(meaningful):
-                cleaned = _sanitize_text(text)
-                if cleaned:
-                    return cleaned
-
-            for text in reversed(candidates):
-                cleaned = _sanitize_text(text)
-                if cleaned:
-                    return cleaned
-
+    def _strip_history_prefixes(text: str) -> str:
+        if not text:
             return ""
+        cleaned = text.lstrip()
+        history_candidates = [prefix.strip() for prefix in history_prefixes if prefix.strip()]
+        noise_prefix_patterns = (
+            r"(?i)^assistant[:：]\s*",
+            r"(?i)^user[:：]\s*",
+            r"(?i)^system[:：]\s*",
+            r"(?i)^ragから情報抽出[^\s：#-]*[:：#\s-]*",
+            r"(?i)^イベント名[^\s]*\s*",
+            r"(?i)^llm_回答生成_rag有り[:：#\s-]*",
+            r"(?i)^回答\s*\(\d+\)\s*",
+        )
+        changed = True
+        while cleaned and changed:
+            changed = False
+            for prefix in history_candidates:
+                if prefix and cleaned.startswith(prefix):
+                    cleaned = cleaned[len(prefix) :].lstrip("：:、,。 \u3000")
+                    changed = True
+            if cleaned:
+                for pattern in noise_prefix_patterns:
+                    new_cleaned = re.sub(pattern, "", cleaned, count=1)
+                    if new_cleaned != cleaned:
+                        cleaned = new_cleaned.lstrip("：:、,。 \u3000")
+                        changed = True
+        return cleaned
 
-        for raw_line in response.iter_lines(decode_unicode=True):
-            if not raw_line:
+    def _strip_prompt_prefix(text: str) -> str:
+        if not text:
+            return ""
+        trimmed = text.lstrip()
+        trimmed = _strip_history_prefixes(trimmed)
+        if prompt_stripped and trimmed.startswith(prompt_stripped):
+            trimmed = trimmed[len(prompt_stripped) :].lstrip("：:、,。 \u3000")
+        return trimmed
+
+    def _is_meaningful_text(text: str) -> bool:
+        if not text:
+            return False
+        stripped = text.strip()
+        if not stripped:
+            return False
+        stripped = _strip_prompt_prefix(stripped)
+        if not stripped:
+            return False
+        if stripped == user_identifier:
+            return False
+        if prompt_stripped and stripped == prompt_stripped:
+            return False
+        if _contains_noise(stripped):
+            return False
+        if not (
+            re.search(r"\s", stripped)
+            or re.search(r"[。．！？!?]", stripped)
+            or re.search(r"[\u3000-\u303F\u3040-\u30ff\u4e00-\u9faf]", stripped)
+        ):
+            return False
+        return True
+
+    def _dedupe_repeated_text(text: str) -> str:
+        if not text:
+            return ""
+        stripped = text.strip()
+        if not stripped:
+            return ""
+        half = len(stripped) // 2
+        if len(stripped) % 2 == 0 and stripped[:half] == stripped[half:]:
+            return _dedupe_repeated_text(stripped[:half])
+        paragraphs = re.split(r"\n{2,}", stripped)
+        filtered_paragraphs: list[str] = []
+        seen_paragraphs: set[str] = set()
+        for paragraph in paragraphs:
+            para_clean = paragraph.strip()
+            if not para_clean:
                 continue
-            if not raw_line.startswith("data:"):
+            if para_clean in seen_paragraphs:
                 continue
-            data_str = raw_line[len("data:"):].strip()
-            if not data_str or data_str == "[DONE]":
+            seen_paragraphs.add(para_clean)
+            filtered_paragraphs.append(paragraph.strip())
+        if filtered_paragraphs:
+            return "\n\n".join(filtered_paragraphs)
+        return stripped
+
+    def _sanitize_text(text: str) -> str:
+        if not text:
+            return ""
+        cleaned = _strip_prompt_prefix(text)
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"(IF/ELSE)", r"\n\1", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"(Answer\s+\d+(?:\s*\([^)]+\))?)", r"\n\1", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"(Variable Assigner)", r"\n\1", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"(workflow_[^\s]*)", r"\n\1", cleaned, flags=re.IGNORECASE)
+        cleaned = "\n".join(line.rstrip() for line in cleaned.splitlines())
+        cleaned = _strip_prompt_prefix(cleaned).strip()
+        if not cleaned or _contains_noise(cleaned.lower()):
+            return ""
+        cleaned = _dedupe_repeated_text(cleaned)
+        cleaned = _strip_prompt_prefix(cleaned).strip()
+        return cleaned if _is_meaningful_text(cleaned) else ""
+
+    def _extract_text_payload(payload: object) -> str:
+        candidates: list[str] = []
+
+        def _collect(obj: object) -> None:
+            if isinstance(obj, str):
+                text = obj.strip()
+                if text:
+                    candidates.append(text)
+                return
+            if isinstance(obj, list):
+                for item in obj:
+                    _collect(item)
+                return
+            if isinstance(obj, dict):
+                value_fields = (
+                    obj.get("value"),
+                    obj.get("answer"),
+                    obj.get("result"),
+                    obj.get("output_text"),
+                    obj.get("text"),
+                    obj.get("content"),
+                    obj.get("message"),
+                    obj.get("data"),
+                )
+                for field in value_fields:
+                    if field is not None:
+                        _collect(field)
+                for key, value in obj.items():
+                    if key in {"value", "answer", "result", "output_text", "text", "content", "message", "data"}:
+                        continue
+                    _collect(value)
+
+        _collect(payload)
+        unique_candidates: list[str] = []
+        seen_candidates: set[str] = set()
+        for item in candidates:
+            if item in seen_candidates:
                 continue
-            try:
-                chunk = json.loads(data_str)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(chunk, dict):
-                continue
+            seen_candidates.add(item)
+            unique_candidates.append(item)
+        candidates = unique_candidates
 
-            if conversation_id := chunk.get("conversation_id"):
-                st.session_state.dify_conversation_id = conversation_id
+        meaningful: list[str] = []
+        for text in candidates:
+            if _is_meaningful_text(text):
+                meaningful.append(text)
 
-            delta = ""
-            if isinstance(chunk.get("answer_delta"), str):
-                delta_candidate = chunk["answer_delta"]
-                if not delta_candidate:
-                    continue
-                delta_candidate = _strip_prompt_prefix(delta_candidate)
-                if not delta_candidate or _contains_noise(delta_candidate):
-                    continue
-                delta_candidate = _dedupe_repeated_text(delta_candidate)
-                if not delta_candidate:
-                    continue
-                delta = delta_candidate
-                accumulated_answer += delta
-            elif isinstance(chunk.get("answer"), str):
-                answer_full_raw = chunk["answer"]
-                if not answer_full_raw:
-                    print(
-                        "[DIFY DEBUG] skip empty answer chunk",
-                        flush=True,
-                    )
-                    continue
-                answer_full = _extract_text_payload(answer_full_raw)
-                if not answer_full:
-                    continue
-                if answer_full.startswith(accumulated_answer):
-                    delta = answer_full[len(accumulated_answer) :]
-                else:
-                    delta = answer_full
-                accumulated_answer = answer_full
-            elif isinstance(chunk.get("message"), dict):
-                message = chunk["message"]
-                answer_full = message.get("answer") if isinstance(message.get("answer"), str) else ""
-                if not answer_full:
-                    print(
-                        "[DIFY DEBUG] skip empty message answer chunk",
-                        flush=True,
-                    )
-                    continue
-                answer_full = _extract_text_payload(answer_full)
-                if not answer_full:
-                    continue
-                if answer_full.startswith(accumulated_answer):
-                    delta = answer_full[len(accumulated_answer) :]
-                else:
-                    delta = answer_full
-                accumulated_answer = answer_full
-            else:
-                event = chunk.get("event")
-                data_section = chunk.get("data") if isinstance(chunk.get("data"), dict) else None
-                if data_section:
-                    outputs_text = _extract_text_payload(data_section.get("outputs"))
-                    if not outputs_text:
-                        outputs_text = _extract_text_payload(data_section)
-                    if outputs_text:
-                        if outputs_text.startswith(accumulated_answer):
-                            delta = outputs_text[len(accumulated_answer) :]
-                        else:
-                            delta = outputs_text
-                        accumulated_answer = outputs_text
-                if event == "error":
-                    last_error_message = (
-                        chunk.get("message")
-                        or chunk.get("error")
-                        or _extract_text_payload(chunk.get("data"))
-                        or "Dify からエラー応答を受信しました"
-                    )
-                    print(
-                        "[DIFY DEBUG] error_event "
-                        f"message={last_error_message}",
-                        flush=True,
-                    )
-                    break
+        for text in reversed(meaningful):
+            cleaned = _sanitize_text(text)
+            if cleaned:
+                return cleaned
 
-            answer_str = chunk["answer"] if isinstance(chunk.get("answer"), str) else None
-            message_obj = chunk.get("message") if isinstance(chunk.get("message"), dict) else None
-            message_answer_str = (
-                message_obj.get("answer") if isinstance(message_obj.get("answer"), str) else None
-            ) if message_obj else None
-            print(
-                "[DIFY DEBUG] event="
-                f"{chunk.get('event')} delta_len={len(delta) if delta else 0} "
-                f"answer_len={len(answer_str) if answer_str is not None else 'None'} "
-                f"message_answer_len={len(message_answer_str) if message_answer_str is not None else 'None'} "
-                f"accumulated_len={len(accumulated_answer)}",
-                flush=True,
-            )
+        for text in reversed(candidates):
+            cleaned = _sanitize_text(text)
+            if cleaned:
+                return cleaned
 
-            if delta:
-                yield delta
+        return ""
 
-        if not accumulated_answer:
-            if last_error_message:
-                raise ValueError(last_error_message)
-            raise ValueError("Dify から応答が取得できませんでした")
+    primary_answer = payload_data.get("answer") if isinstance(payload_data.get("answer"), str) else ""
+    cleaned_primary = _sanitize_text(primary_answer)
+    if cleaned_primary:
+        return cleaned_primary
+
+    fallback_answer = _extract_text_payload(payload_data)
+    if fallback_answer:
+        return fallback_answer
+
+    error_message = payload_data.get("message") or payload_data.get("error")
+    if isinstance(error_message, str) and error_message.strip():
+        raise ValueError(_strip_history_prefixes(error_message.strip()))
+
+    raise ValueError("Dify から応答が取得できませんでした")
 
 def main_ui():
     st.set_page_config(page_title="Pivot AI", page_icon="💬", layout="wide")
@@ -610,19 +537,16 @@ def main_ui():
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
-            response_container = st.empty()
-            accumulated_response = ""
             try:
                 with st.spinner("Dify から応答を取得しています..."):
-                    for delta in stream_dify(prompt):
-                        accumulated_response += delta
-                        response_container.markdown(accumulated_response)
+                    answer_text = fetch_dify_response(prompt)
             except Exception as exc:  # noqa: BLE001 - surface API errors to user
                 error_message = f"応答の取得に失敗しました: {exc}"
                 st.session_state.messages.append({"role": "assistant", "content": error_message})
-                response_container.error(error_message)
+                st.error(error_message)
             else:
-                st.session_state.messages.append({"role": "assistant", "content": accumulated_response})
+                st.session_state.messages.append({"role": "assistant", "content": answer_text})
+                st.markdown(answer_text)
 
 
 main_ui()
