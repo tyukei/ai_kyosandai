@@ -157,7 +157,7 @@ def _get_dify_config():
     return api_key, base_url, user_identifier
 
 
-def fetch_dify_response(prompt: str) -> str:
+def stream_dify(prompt: str):
     api_key, base_url, user_identifier = _get_dify_config()
     conversation_id = st.session_state.get("dify_conversation_id")
 
@@ -213,7 +213,7 @@ def fetch_dify_response(prompt: str) -> str:
     payload = {
         "inputs": inputs,
         "query": prompt,
-        "response_mode": "blocking",
+        "response_mode": "streaming",
         "user": user_identifier,
     }
     if conversation_id:
@@ -229,46 +229,37 @@ def fetch_dify_response(prompt: str) -> str:
         json=payload,
         headers=headers,
         timeout=30,
+        stream=True,
     )
     response.raise_for_status()
-
-    try:
-        payload_data = response.json()
-    except ValueError as exc:  # noqa: B904
-        raise ValueError("Dify からJSON以外の応答を受信しました") from exc
-
-    if conversation_id := payload_data.get("conversation_id"):
-        st.session_state.dify_conversation_id = conversation_id
 
     def _contains_noise(text: str) -> bool:
         if not text:
             return False
         lowered = text.lower()
+        prompt_lower = prompt_stripped.lower() if prompt_stripped else ""
+        if prompt_lower and lowered == prompt_lower:
+            return True
         if lowered in {"true", "false", "not empty"}:
             return True
-        if prompt_stripped and lowered == prompt_stripped.lower():
-            return True
-        if "if/else" in lowered:
-            return True
-        if "variable assigner" in lowered:
-            return True
-        if "workflow_" in lowered:
-            return True
+        for substring in ("if/else", "variable assigner", "workflow_"):
+            if substring in lowered:
+                return True
         if lowered.endswith("succeeded"):
             return True
-        if re.fullmatch(r"[0-9a-f]{16,}", lowered.replace("-", "")):
+        compact_hex = lowered.replace("-", "")
+        if re.fullmatch(r"[0-9a-f]{16,}", compact_hex):
             return True
-        if lowered.startswith("answer "):
-            return True
-        if lowered.startswith("ragから情報抽出"):
-            return True
-        if lowered.startswith("イベント名"):
-            return True
-        if lowered.startswith("llm_回答生成_rag有り"):
-            return True
-        if re.fullmatch(r"回答\s*\(\d+\)", lowered):
-            return True
-        if lowered.startswith(";unnamed:"):
+        for prefix in (
+            "answer ",
+            "ragから情報抽出",
+            "イベント名",
+            "llm_回答生成_rag有り",
+            ";unnamed:",
+        ):
+            if lowered.startswith(prefix):
+                return True
+        if re.fullmatch(r"回答\s*\(\d+\)", text.strip()):
             return True
         return False
 
@@ -364,91 +355,147 @@ def fetch_dify_response(prompt: str) -> str:
         cleaned = cleaned.strip()
         if not cleaned:
             return ""
+        marker = ";Unnamed:"
+        if marker in cleaned:
+            _, _, remainder = cleaned.partition(marker)
+            cleaned = f"{marker}{remainder}"
         cleaned = re.sub(r"(IF/ELSE)", r"\n\1", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"(Answer\s+\d+(?:\s*\([^)]+\))?)", r"\n\1", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"(Variable Assigner)", r"\n\1", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"(workflow_[^\s]*)", r"\n\1", cleaned, flags=re.IGNORECASE)
         cleaned = "\n".join(line.rstrip() for line in cleaned.splitlines())
         cleaned = _strip_prompt_prefix(cleaned).strip()
-        if not cleaned or _contains_noise(cleaned.lower()):
+        if not cleaned or _contains_noise(cleaned):
             return ""
         cleaned = _dedupe_repeated_text(cleaned)
         cleaned = _strip_prompt_prefix(cleaned).strip()
         return cleaned if _is_meaningful_text(cleaned) else ""
 
-    def _extract_text_payload(payload: object) -> str:
-        candidates: list[str] = []
+    def _iter_strings(value: object):
+        if isinstance(value, str):
+            yield value
+            return
+        if isinstance(value, list):
+            for item in value:
+                yield from _iter_strings(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                yield from _iter_strings(item)
 
-        def _collect(obj: object) -> None:
-            if isinstance(obj, str):
-                text = obj.strip()
-                if text:
-                    candidates.append(text)
-                return
-            if isinstance(obj, list):
-                for item in obj:
-                    _collect(item)
-                return
-            if isinstance(obj, dict):
-                value_fields = (
-                    obj.get("value"),
-                    obj.get("answer"),
-                    obj.get("result"),
-                    obj.get("output_text"),
-                    obj.get("text"),
-                    obj.get("content"),
-                    obj.get("message"),
-                    obj.get("data"),
-                )
-                for field in value_fields:
-                    if field is not None:
-                        _collect(field)
-                for key, value in obj.items():
-                    if key in {"value", "answer", "result", "output_text", "text", "content", "message", "data"}:
-                        continue
-                    _collect(value)
-
-        _collect(payload)
-        unique_candidates: list[str] = []
-        seen_candidates: set[str] = set()
-        for item in candidates:
-            if item in seen_candidates:
-                continue
-            seen_candidates.add(item)
-            unique_candidates.append(item)
-        candidates = unique_candidates
-
-        meaningful: list[str] = []
-        for text in candidates:
-            if _is_meaningful_text(text):
-                meaningful.append(text)
-
-        for text in reversed(meaningful):
-            cleaned = _sanitize_text(text)
-            if cleaned:
-                return cleaned
-
-        for text in reversed(candidates):
-            cleaned = _sanitize_text(text)
-            if cleaned:
-                return cleaned
-
+    def _first_text(value: object) -> str:
+        if value is None:
+            return ""
+        for candidate in _iter_strings(value):
+            stripped = candidate.strip()
+            if stripped:
+                return candidate
         return ""
 
-    primary_answer = payload_data.get("answer") if isinstance(payload_data.get("answer"), str) else ""
-    cleaned_primary = _sanitize_text(primary_answer)
-    if cleaned_primary:
-        return cleaned_primary
+    raw_buffer = ""
+    cleaned_answer = ""
+    last_error_message = ""
 
-    fallback_answer = _extract_text_payload(payload_data)
-    if fallback_answer:
-        return fallback_answer
+    def _emit_cleaned() -> str:
+        nonlocal cleaned_answer
+        cleaned_full = _sanitize_text(raw_buffer)
+        if not cleaned_full:
+            return ""
+        if cleaned_full.startswith(cleaned_answer):
+            delta = cleaned_full[len(cleaned_answer) :]
+        else:
+            delta = cleaned_full
+        cleaned_answer = cleaned_full
+        return delta
 
-    error_message = payload_data.get("message") or payload_data.get("error")
-    if isinstance(error_message, str) and error_message.strip():
-        raise ValueError(_strip_history_prefixes(error_message.strip()))
+    def _append_raw(raw_text: str) -> str:
+        nonlocal raw_buffer
+        if not raw_text:
+            return ""
+        raw_buffer += raw_text
+        return _emit_cleaned()
 
-    raise ValueError("Dify から応答が取得できませんでした")
+    def _replace_raw(raw_text: str) -> str:
+        nonlocal raw_buffer
+        if not raw_text:
+            return ""
+        raw_buffer = raw_text
+        return _emit_cleaned()
+
+    for raw_line in response.iter_lines(decode_unicode=True):
+        if not raw_line:
+            continue
+        if not raw_line.startswith("data:"):
+            continue
+        data_str = raw_line[len("data:"):].strip()
+        if not data_str or data_str == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(chunk, dict):
+            continue
+
+        if conversation_id := chunk.get("conversation_id"):
+            st.session_state.dify_conversation_id = conversation_id
+
+        delta = ""
+        if isinstance(chunk.get("answer_delta"), str):
+            raw_piece = _strip_prompt_prefix(chunk["answer_delta"])
+            if not raw_piece:
+                continue
+            delta = _append_raw(raw_piece)
+        elif isinstance(chunk.get("answer"), str):
+            raw_piece = chunk["answer"]
+            if not raw_piece.strip():
+                print("[DIFY DEBUG] skip empty answer chunk", flush=True)
+                continue
+            delta = _replace_raw(raw_piece)
+        elif isinstance(chunk.get("message"), dict):
+            message = chunk["message"]
+            raw_piece = _first_text(message.get("answer"))
+            if not raw_piece:
+                print("[DIFY DEBUG] skip empty message answer chunk", flush=True)
+                continue
+            delta = _replace_raw(raw_piece)
+        else:
+            event = chunk.get("event")
+            data_section = chunk.get("data") if isinstance(chunk.get("data"), dict) else None
+            if data_section and not cleaned_answer:
+                raw_piece = _first_text(data_section.get("outputs")) or _first_text(data_section)
+                if raw_piece:
+                    delta = _replace_raw(raw_piece)
+            if event == "error":
+                last_error_message = (
+                    _first_text(chunk.get("message"))
+                    or _first_text(chunk.get("error"))
+                    or _first_text(chunk.get("data"))
+                    or "Dify からエラー応答を受信しました"
+                )
+                print("[DIFY DEBUG] error_event message=%s" % last_error_message, flush=True)
+                break
+
+        answer_str = chunk["answer"] if isinstance(chunk.get("answer"), str) else None
+        message_obj = chunk.get("message") if isinstance(chunk.get("message"), dict) else None
+        message_answer_str = (
+            message_obj.get("answer") if isinstance(message_obj.get("answer"), str) else None
+        ) if message_obj else None
+        print(
+            "[DIFY DEBUG] event="
+            f"{chunk.get('event')} delta_len={len(delta) if delta else 0} "
+            f"answer_len={len(answer_str) if answer_str is not None else 'None'} "
+            f"message_answer_len={len(message_answer_str) if message_answer_str is not None else 'None'} "
+            f"accumulated_len={len(cleaned_answer)}",
+            flush=True,
+        )
+
+        if delta:
+            yield delta
+
+    if not cleaned_answer:
+        if last_error_message:
+            raise ValueError(_strip_history_prefixes(last_error_message.strip()))
+        raise ValueError("Dify から応答が取得できませんでした")
 
 def main_ui():
     st.set_page_config(page_title="Pivot AI", page_icon="💬", layout="wide")
@@ -537,16 +584,19 @@ def main_ui():
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
+            response_container = st.empty()
+            accumulated_response = ""
             try:
                 with st.spinner("Dify から応答を取得しています..."):
-                    answer_text = fetch_dify_response(prompt)
+                    for delta in stream_dify(prompt):
+                        accumulated_response += delta
+                        response_container.markdown(accumulated_response)
             except Exception as exc:  # noqa: BLE001 - surface API errors to user
                 error_message = f"応答の取得に失敗しました: {exc}"
                 st.session_state.messages.append({"role": "assistant", "content": error_message})
-                st.error(error_message)
+                response_container.error(error_message)
             else:
-                st.session_state.messages.append({"role": "assistant", "content": answer_text})
-                st.markdown(answer_text)
+                st.session_state.messages.append({"role": "assistant", "content": accumulated_response})
 
 
 main_ui()
