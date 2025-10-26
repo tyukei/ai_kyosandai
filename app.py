@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from typing import Optional
 
 import streamlit as st
@@ -383,33 +384,46 @@ def stream_dify(prompt: str):
                 return candidate
         return ""
 
-    def _blocking_request() -> str:
+    def _blocking_request(retries: int = 2, delay: float = 1.5) -> str:
         blocking_payload = dict(payload)
         blocking_payload["response_mode"] = "blocking"
         blocking_headers = dict(headers)
         blocking_headers["Accept"] = "application/json"
-        try:
-            resp = requests.post(
-                f"{base_url}/v1/chat-messages",
-                json=blocking_payload,
-                headers=blocking_headers,
-                timeout=30,
-            )
-            resp.raise_for_status()
-        except requests.exceptions.RequestException:
-            return ""
-        try:
-            data = resp.json()
-        except ValueError:
-            return ""
-        if conversation_id := data.get("conversation_id"):
-            st.session_state.dify_conversation_id = conversation_id
-        answer_text = ""
-        if isinstance(data.get("answer"), str):
-            answer_text = data["answer"]
-        if not answer_text:
-            answer_text = _first_text(data)
-        return _sanitize_text(answer_text)
+
+        for attempt in range(retries + 1):
+            try:
+                resp = requests.post(
+                    f"{base_url}/v1/chat-messages",
+                    json=blocking_payload,
+                    headers=blocking_headers,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+            except requests.exceptions.RequestException:
+                if attempt == retries:
+                    return ""
+            else:
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = None
+                if isinstance(data, dict):
+                    if conversation_id := data.get("conversation_id"):
+                        st.session_state.dify_conversation_id = conversation_id
+                    answer_text = ""
+                    if isinstance(data.get("answer"), str):
+                        answer_text = data["answer"]
+                    if not answer_text:
+                        answer_text = _first_text(data.get("outputs")) or _first_text(data)
+                    if answer_text:
+                        cleaned = _sanitize_text(answer_text)
+                        if not cleaned:
+                            cleaned = answer_text.strip()
+                        if cleaned:
+                            return cleaned
+            if delay > 0 and attempt < retries:
+                time.sleep(delay)
+        return ""
 
     raw_buffer = ""
     cleaned_answer = ""
@@ -441,22 +455,37 @@ def stream_dify(prompt: str):
         raw_buffer = raw_text
         return _emit_cleaned()
 
+    use_blocking_initial = bool(file_id)
+
+    if use_blocking_initial:
+        blocking_answer = _blocking_request(retries=3, delay=1.5)
+        if blocking_answer:
+            raw_buffer = blocking_answer
+            cleaned_answer = blocking_answer
+            yield blocking_answer
+            return
+        # Fall back to streaming if blocking failed; continue below.
+
     try:
         response = requests.post(
             f"{base_url}/v1/chat-messages",
             json=payload,
             headers=headers,
-            timeout=(5, 120),
+            timeout=60,
             stream=True,
         )
         response.raise_for_status()
     except requests.exceptions.RequestException as exc:
         fallback_answer = _blocking_request()
-        if fallback_answer:
-            raw_buffer = fallback_answer
-            delta = fallback_answer
-            cleaned_answer = fallback_answer
-            yield delta
+        final_text = fallback_answer or ""
+        if final_text:
+            delta = final_text
+            if cleaned_answer and final_text.startswith(cleaned_answer):
+                delta = final_text[len(cleaned_answer) :]
+            raw_buffer = final_text
+            cleaned_answer = final_text
+            if delta:
+                yield delta
             return
         raise ValueError("Dify への接続に失敗しました") from exc
 
@@ -532,13 +561,18 @@ def stream_dify(prompt: str):
             if delta:
                 yield delta
     except requests.exceptions.RequestException as exc:
+        if cleaned_answer:
+            return
         fallback_answer = _blocking_request()
-        if fallback_answer:
-            delta = fallback_answer
-            if fallback_answer.startswith(cleaned_answer):
-                delta = fallback_answer[len(cleaned_answer) :]
-            raw_buffer = fallback_answer
-            cleaned_answer = fallback_answer
+        if not fallback_answer and raw_buffer:
+            fallback_answer = _sanitize_text(raw_buffer) or raw_buffer.strip()
+        final_text = fallback_answer or ""
+        if final_text:
+            delta = final_text
+            if cleaned_answer and final_text.startswith(cleaned_answer):
+                delta = final_text[len(cleaned_answer) :]
+            raw_buffer = final_text
+            cleaned_answer = final_text
             if delta:
                 yield delta
             return
