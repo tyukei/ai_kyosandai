@@ -15,12 +15,39 @@ https://github.com/user-attachments/assets/72a4ca30-6cef-435e-a29d-967bb7c9fe3f
 
 
 ## アプリの使い方
+### 質問入力と回答の流れ
+	1.	入力フォームに質問を入力
+	2.	Enter または 送信ボタンをクリック
+	3.	AIの回答を待つ
+	4.	回答を確認し、必要に応じて質問を繰り返す
+
+
 <img width="1145" height="616" alt="image" src="https://github.com/user-attachments/assets/f3173f65-3c64-4d02-b1a8-a451012726e5" />
 
+
+### ピボット知識使用（RAG）
+	•	ピボットのデータから関連知識を検索して回答に反映
+	•	設定項目：is_rag
+	•	true → 知識使用（推奨設定）
+	•	false → AI単体で回答
+	•	true時にピボットの特定知識が取り込まれていることを確認
+ 
 <img width="1213" height="674" alt="image" src="https://github.com/user-attachments/assets/50c1ade9-f00e-483c-97b8-13ada977cdd2" />
+
+### システムプロンプト
+	•	AIの話し方やキャラクターを変更できる
+	•	例：「あなたは伝説のラッパーです。」→ ラッパー風に回答
+	•	基本設定は不要（空欄で通常モード）
+
 
 <img width="1213" height="674" alt="image" src="https://github.com/user-attachments/assets/ca1ce8e8-6978-4f98-93f5-9d95456bdbef" />
 
+
+### ファイルアップロード機能
+	•	ファイルをアップロードすると、その内容を元にAIが回答を生成
+	•	操作：ファイルをドラッグ＆ドロップ → アップロード完了後に質問
+	•	資料に基づいたアドバイスや説明が可能
+ 
 <img width="1005" height="489" alt="image" src="https://github.com/user-attachments/assets/132308a3-c318-4a79-bc0c-2934d0d04258" />
 
 
