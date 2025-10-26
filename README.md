@@ -21,6 +21,7 @@ https://github.com/user-attachments/assets/72a4ca30-6cef-435e-a29d-967bb7c9fe3f
 
 <img width="1213" height="674" alt="image" src="https://github.com/user-attachments/assets/ca1ce8e8-6978-4f98-93f5-9d95456bdbef" />
 
+<img width="1005" height="489" alt="image" src="https://github.com/user-attachments/assets/132308a3-c318-4a79-bc0c-2934d0d04258" />
 
 
 - サイドバーの「ファイルアップロード」でファイルを選択すると即座に GCS にアップロードされ、ファイル名が Dify への入力として利用されます。
