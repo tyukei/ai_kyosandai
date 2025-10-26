@@ -15,6 +15,12 @@ https://github.com/user-attachments/assets/72a4ca30-6cef-435e-a29d-967bb7c9fe3f
 
 
 ## アプリの使い方
+<img width="1145" height="616" alt="image" src="https://github.com/user-attachments/assets/f3173f65-3c64-4d02-b1a8-a451012726e5" />
+
+<img width="1213" height="674" alt="image" src="https://github.com/user-attachments/assets/50c1ade9-f00e-483c-97b8-13ada977cdd2" />
+
+<img width="1213" height="674" alt="image" src="https://github.com/user-attachments/assets/ca1ce8e8-6978-4f98-93f5-9d95456bdbef" />
+
 
 
 - サイドバーの「ファイルアップロード」でファイルを選択すると即座に GCS にアップロードされ、ファイル名が Dify への入力として利用されます。
