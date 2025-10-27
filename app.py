@@ -290,8 +290,8 @@ def stream_dify(prompt: str):
             return ""
         trimmed = text.lstrip()
         trimmed = _strip_history_prefixes(trimmed)
-        if prompt_stripped and trimmed.startswith(prompt_stripped):
-            trimmed = trimmed[len(prompt_stripped) :].lstrip("：:、,。 \u3000")
+        if prompt_stripped and trimmed == prompt_stripped:
+            return ""
         return trimmed
 
     def _is_meaningful_text(text: str) -> bool:
