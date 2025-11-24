@@ -195,21 +195,8 @@ def stream_dify(prompt: str):
         if last_entry == expected_last:
             history_lines.pop()
 
-    history_prefixes: list[str] = []
     if history_lines:
         inputs["history"] = "\n".join(history_lines)
-        print("[DIFY DEBUG] conversation history:")
-        for line in history_lines:
-            print(f"  {line}")
-            stripped_line = line.strip()
-            if not stripped_line:
-                continue
-            history_prefixes.append(stripped_line)
-            if ":" in stripped_line:
-                _, _, content_only = stripped_line.partition(":")
-                content_only = content_only.strip()
-                if content_only:
-                    history_prefixes.append(content_only)
 
     payload = {
         "inputs": inputs,
