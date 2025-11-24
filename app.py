@@ -170,7 +170,7 @@ def stream_dify(prompt: str):
     if file_id:
         inputs["file_id"] = file_id
 
-    is_rag_value = st.session_state.get("dify_is_rag", "")
+    is_rag_value = st.session_state.get("dify_is_rag", "true")
     if isinstance(is_rag_value, str) and is_rag_value.strip().lower() == "true":
         inputs["is_rag"] = "true"
 
@@ -226,164 +226,6 @@ def stream_dify(prompt: str):
         "Accept": "text/event-stream",
     }
 
-    def _contains_noise(text: str) -> bool:
-        if not text:
-            return False
-        lowered = text.lower()
-        prompt_lower = prompt_stripped.lower() if prompt_stripped else ""
-        if prompt_lower and lowered == prompt_lower:
-            return True
-        if lowered in {"true", "false", "not empty"}:
-            return True
-        for substring in ("if/else", "variable assigner", "workflow_"):
-            if substring in lowered:
-                return True
-        if lowered.endswith("succeeded"):
-            return True
-        compact_hex = lowered.replace("-", "")
-        if re.fullmatch(r"[0-9a-f]{16,}", compact_hex):
-            return True
-        for prefix in (
-            "answer ",
-            "ragから情報抽出",
-            "イベント名",
-            "llm_回答生成_rag有り",
-            ";unnamed:",
-        ):
-            if lowered.startswith(prefix):
-                return True
-        if re.fullmatch(r"回答\s*\(\d+\)", text.strip()):
-            return True
-        return False
-
-    def _strip_history_prefixes(text: str) -> str:
-        if not text:
-            return ""
-        cleaned = text.lstrip()
-        history_candidates = [prefix.strip() for prefix in history_prefixes if prefix.strip()]
-        noise_prefix_patterns = (
-            r"(?i)^assistant[:：]\s*",
-            r"(?i)^user[:：]\s*",
-            r"(?i)^system[:：]\s*",
-            r"(?i)^ragから情報抽出[^\s：#-]*[:：#\s-]*",
-            r"(?i)^イベント名[^\s]*\s*",
-            r"(?i)^llm_回答生成_rag有り[:：#\s-]*",
-            r"(?i)^回答\s*\(\d+\)\s*",
-        )
-        changed = True
-        while cleaned and changed:
-            changed = False
-            for prefix in history_candidates:
-                if prefix and cleaned.startswith(prefix):
-                    cleaned = cleaned[len(prefix) :].lstrip("：:、,。 \u3000")
-                    changed = True
-            if cleaned:
-                for pattern in noise_prefix_patterns:
-                    new_cleaned = re.sub(pattern, "", cleaned, count=1)
-                    if new_cleaned != cleaned:
-                        cleaned = new_cleaned.lstrip("：:、,。 \u3000")
-                        changed = True
-        return cleaned
-
-    def _strip_prompt_prefix(text: str) -> str:
-        if not text:
-            return ""
-        trimmed = text.lstrip()
-        trimmed = _strip_history_prefixes(trimmed)
-        if prompt_stripped and trimmed == prompt_stripped:
-            return ""
-        return trimmed
-
-    def _is_meaningful_text(text: str) -> bool:
-        if not text:
-            return False
-        stripped = text.strip()
-        if not stripped:
-            return False
-        stripped = _strip_prompt_prefix(stripped)
-        if not stripped:
-            return False
-        if stripped == user_identifier:
-            return False
-        if prompt_stripped and stripped == prompt_stripped:
-            return False
-        if _contains_noise(stripped):
-            return False
-        if not (
-            re.search(r"\s", stripped)
-            or re.search(r"[。．！？!?]", stripped)
-            or re.search(r"[\u3000-\u303F\u3040-\u30ff\u4e00-\u9faf]", stripped)
-        ):
-            return False
-        return True
-
-    def _dedupe_repeated_text(text: str) -> str:
-        if not text:
-            return ""
-        stripped = text.strip()
-        if not stripped:
-            return ""
-        half = len(stripped) // 2
-        if len(stripped) % 2 == 0 and stripped[:half] == stripped[half:]:
-            return _dedupe_repeated_text(stripped[:half])
-        paragraphs = re.split(r"\n{2,}", stripped)
-        filtered_paragraphs: list[str] = []
-        seen_paragraphs: set[str] = set()
-        for paragraph in paragraphs:
-            para_clean = paragraph.strip()
-            if not para_clean:
-                continue
-            if para_clean in seen_paragraphs:
-                continue
-            seen_paragraphs.add(para_clean)
-            filtered_paragraphs.append(paragraph.strip())
-        if filtered_paragraphs:
-            return "\n\n".join(filtered_paragraphs)
-        return stripped
-
-    def _sanitize_text(text: str) -> str:
-        if not text:
-            return ""
-        cleaned = _strip_prompt_prefix(text)
-        cleaned = cleaned.strip()
-        if not cleaned:
-            return ""
-        marker = ";Unnamed:"
-        if marker in cleaned:
-            _, _, remainder = cleaned.partition(marker)
-            cleaned = f"{marker}{remainder}"
-        cleaned = re.sub(r"(IF/ELSE)", r"\n\1", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"(Answer\s+\d+(?:\s*\([^)]+\))?)", r"\n\1", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"(Variable Assigner)", r"\n\1", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"(workflow_[^\s]*)", r"\n\1", cleaned, flags=re.IGNORECASE)
-        cleaned = "\n".join(line.rstrip() for line in cleaned.splitlines())
-        cleaned = _strip_prompt_prefix(cleaned).strip()
-        if not cleaned or _contains_noise(cleaned):
-            return ""
-        cleaned = _dedupe_repeated_text(cleaned)
-        cleaned = _strip_prompt_prefix(cleaned).strip()
-        return cleaned if _is_meaningful_text(cleaned) else ""
-
-    def _iter_strings(value: object):
-        if isinstance(value, str):
-            yield value
-            return
-        if isinstance(value, list):
-            for item in value:
-                yield from _iter_strings(item)
-        elif isinstance(value, dict):
-            for item in value.values():
-                yield from _iter_strings(item)
-
-    def _first_text(value: object) -> str:
-        if value is None:
-            return ""
-        for candidate in _iter_strings(value):
-            stripped = candidate.strip()
-            if stripped:
-                return candidate
-        return ""
-
     def _blocking_request(retries: int = 2, delay: float = 1.5) -> str:
         blocking_payload = dict(payload)
         blocking_payload["response_mode"] = "blocking"
@@ -413,55 +255,17 @@ def stream_dify(prompt: str):
                     answer_text = ""
                     if isinstance(data.get("answer"), str):
                         answer_text = data["answer"]
-                    if not answer_text:
-                        answer_text = _first_text(data.get("outputs")) or _first_text(data)
                     if answer_text:
-                        cleaned = _sanitize_text(answer_text)
-                        if not cleaned:
-                            cleaned = answer_text.strip()
-                        if cleaned:
-                            return cleaned
+                        return answer_text
             if delay > 0 and attempt < retries:
                 time.sleep(delay)
         return ""
-
-    raw_buffer = ""
-    cleaned_answer = ""
-    last_error_message = ""
-
-    def _emit_cleaned() -> str:
-        nonlocal cleaned_answer
-        cleaned_full = _sanitize_text(raw_buffer)
-        if not cleaned_full:
-            return ""
-        if cleaned_full.startswith(cleaned_answer):
-            delta = cleaned_full[len(cleaned_answer) :]
-        else:
-            delta = cleaned_full
-        cleaned_answer = cleaned_full
-        return delta
-
-    def _append_raw(raw_text: str) -> str:
-        nonlocal raw_buffer
-        if not raw_text:
-            return ""
-        raw_buffer += raw_text
-        return _emit_cleaned()
-
-    def _replace_raw(raw_text: str) -> str:
-        nonlocal raw_buffer
-        if not raw_text:
-            return ""
-        raw_buffer = raw_text
-        return _emit_cleaned()
 
     use_blocking_initial = bool(file_id)
 
     if use_blocking_initial:
         blocking_answer = _blocking_request(retries=3, delay=1.5)
         if blocking_answer:
-            raw_buffer = blocking_answer
-            cleaned_answer = blocking_answer
             yield blocking_answer
             return
         # Fall back to streaming if blocking failed; continue below.
@@ -477,15 +281,8 @@ def stream_dify(prompt: str):
         response.raise_for_status()
     except requests.exceptions.RequestException as exc:
         fallback_answer = _blocking_request()
-        final_text = fallback_answer or ""
-        if final_text:
-            delta = final_text
-            if cleaned_answer and final_text.startswith(cleaned_answer):
-                delta = final_text[len(cleaned_answer) :]
-            raw_buffer = final_text
-            cleaned_answer = final_text
-            if delta:
-                yield delta
+        if fallback_answer:
+            yield fallback_answer
             return
         raise ValueError("Dify への接続に失敗しました") from exc
 
@@ -510,80 +307,30 @@ def stream_dify(prompt: str):
 
             delta = ""
             if isinstance(chunk.get("answer_delta"), str):
-                raw_piece = _strip_prompt_prefix(chunk["answer_delta"])
-                if not raw_piece:
-                    continue
-                delta = _append_raw(raw_piece)
+                delta = chunk["answer_delta"]
             elif isinstance(chunk.get("answer"), str):
-                raw_piece = chunk["answer"]
-                if not raw_piece.strip():
-                    print("[DIFY DEBUG] skip empty answer chunk", flush=True)
-                    continue
-                delta = _replace_raw(raw_piece)
+                delta = chunk["answer"]
             elif isinstance(chunk.get("message"), dict):
                 message = chunk["message"]
-                raw_piece = _first_text(message.get("answer"))
-                if not raw_piece:
-                    print("[DIFY DEBUG] skip empty message answer chunk", flush=True)
-                    continue
-                delta = _replace_raw(raw_piece)
-            else:
-                event = chunk.get("event")
-                data_section = chunk.get("data") if isinstance(chunk.get("data"), dict) else None
-                if data_section and not cleaned_answer:
-                    raw_piece = _first_text(data_section.get("outputs")) or _first_text(data_section)
-                    if raw_piece:
-                        delta = _replace_raw(raw_piece)
-                if event == "error":
-                    last_error_message = (
-                        _first_text(chunk.get("message"))
-                        or _first_text(chunk.get("error"))
-                        or _first_text(chunk.get("data"))
-                        or "Dify からエラー応答を受信しました"
-                    )
-                    print("[DIFY DEBUG] error_event message=%s" % last_error_message, flush=True)
-                    break
-
-            answer_str = chunk["answer"] if isinstance(chunk.get("answer"), str) else None
-            message_obj = chunk.get("message") if isinstance(chunk.get("message"), dict) else None
-            message_answer_str = (
-                message_obj.get("answer") if isinstance(message_obj.get("answer"), str) else None
-            ) if message_obj else None
-            print(
-                "[DIFY DEBUG] event="
-                f"{chunk.get('event')} delta_len={len(delta) if delta else 0} "
-                f"answer_len={len(answer_str) if answer_str is not None else 'None'} "
-                f"message_answer_len={len(message_answer_str) if message_answer_str is not None else 'None'} "
-                f"accumulated_len={len(cleaned_answer)}",
-                flush=True,
-            )
+                if isinstance(message.get("answer"), str):
+                    delta = message["answer"]
+            
+            # Handle error events
+            if chunk.get("event") == "error":
+                error_msg = chunk.get("message") or chunk.get("error") or "Dify Error"
+                print(f"[DIFY ERROR] {error_msg}", flush=True)
 
             if delta:
                 yield delta
+
     except requests.exceptions.RequestException as exc:
-        if cleaned_answer:
-            return
         fallback_answer = _blocking_request()
-        if not fallback_answer and raw_buffer:
-            fallback_answer = _sanitize_text(raw_buffer) or raw_buffer.strip()
-        final_text = fallback_answer or ""
-        if final_text:
-            delta = final_text
-            if cleaned_answer and final_text.startswith(cleaned_answer):
-                delta = final_text[len(cleaned_answer) :]
-            raw_buffer = final_text
-            cleaned_answer = final_text
-            if delta:
-                yield delta
+        if fallback_answer:
+            yield fallback_answer
             return
         raise ValueError("Dify ストリーミング中に接続が中断されました") from exc
     finally:
         response.close()
-
-    if not cleaned_answer:
-        if last_error_message:
-            raise ValueError(_strip_history_prefixes(last_error_message.strip()))
-        raise ValueError("Dify から応答が取得できませんでした")
 
 def main_ui():
     st.set_page_config(page_title="ピボットAI壁打ち君", page_icon="💬", layout="wide")
@@ -612,9 +359,9 @@ def main_ui():
         st.subheader("AIオプション")
         st.selectbox(
             "is_rag (任意)",
-            options=["true", ""],
+            options=["true", "false"],
             key="dify_is_rag",
-            help="RAG を利用したい場合は 'true' を、利用しない場合は空を選択します。",
+            help="RAG を利用したい場合は 'true' を、利用しない場合は 'false' を選択します。",
         )
         st.text_area(
             "system_prompt (任意)",
