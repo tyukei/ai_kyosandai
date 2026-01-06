@@ -320,8 +320,8 @@ def stream_dify(prompt: str):
         response.close()
 
 def main_ui():
-    st.set_page_config(page_title="ピボットAI壁打ち君", page_icon="💬", layout="wide")
-    st.title("ピボットAI壁打ち君")
+    st.set_page_config(page_title="PIVOT AI", page_icon="💬", layout="wide")
+    st.title("PIVOT AI")
 
     gcs_config_error: Optional[str] = None
     try:

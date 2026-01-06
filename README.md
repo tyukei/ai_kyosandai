@@ -1,8 +1,8 @@
-# ピボットAI壁打ち君
+# PIVOT AI
 
 https://aikyosandai.streamlit.app
 
-ピボットAI壁打ち君 は、Dify Workflow と連携したチャット UI を Streamlit で提供するアプリです。  
+PIVOT AI は、Dify Workflow と連携したチャット UI を Streamlit で提供するアプリです。  
 左サイドバーからアップロードしたファイルを Google Cloud Storage（GCS）へ保存し、そのファイル名や各種オプションを Dify 渡しながら会話を進められます。
 
 ## デモ
