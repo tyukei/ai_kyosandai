@@ -13,6 +13,7 @@ https://github.com/user-attachments/assets/72a4ca30-6cef-435e-a29d-967bb7c9fe3f
 - GCS バケット: https://console.cloud.google.com/storage/browser/ai-pivot-chatagent-kyoto-sangyo-university/kyosandai
 - リポジトリ: https://github.com/tyukei/ai_kyosandai
 - googleform: https://docs.google.com/forms/d/1VOw43I1a8Xcqd2IOqzE2EGCHFP5DV11Z4Gi8Kk61jIk/edit
+- ログイン: https://docs.google.com/spreadsheets/d/1MoHo_jHEo6apsEgi6uQcRUnk_BPkLJ7MFqvO5tjh6pE/edit?hl=ja&gid=0#gid
 
 ## アプリの使い方
 ### 質問入力と回答の流れ
