@@ -47,11 +47,13 @@ https://github.com/user-attachments/assets/72a4ca30-6cef-435e-a29d-967bb7c9fe3f
 	•	ファイルをアップロードすると、その内容を元にAIが回答を生成
 	•	操作：ファイルをドラッグ＆ドロップ → アップロード完了後に質問
 	•	資料に基づいたアドバイスや説明が可能
- 
+	•	PPTX ファイルは自動的に PDF に変換されてアップロードされます
+
 <img width="1005" height="489" alt="image" src="https://github.com/user-attachments/assets/132308a3-c318-4a79-bc0c-2934d0d04258" />
 
 
 - サイドバーの「ファイルアップロード」でファイルを選択すると即座に GCS にアップロードされ、ファイル名が Dify への入力として利用されます。
+- PPTX ファイル（.pptx）をアップロードすると、LibreOffice を使って PDF に自動変換されてから GCS にアップロードされます。
 - `is_rag`（デフォルトで `true`）や `system_prompt` を設定すると、その値が Dify Workflow の `inputs` に渡されます。
 - これまでの会話履歴は `history` 入力パラメータとして `user:質問\nassistant:回答` 形式で Dify に送信されます（最新のユーザー入力は `query` と重複しないよう除外）。
 - チャット入力欄にメッセージを送信すると、Dify からのストリーミング応答が表示されます。
@@ -81,6 +83,10 @@ https://github.com/user-attachments/assets/72a4ca30-6cef-435e-a29d-967bb7c9fe3f
 - Python 3.10 以上を推奨
 - Google Cloud Storage バケットとサービスアカウント（JSON キー）
 - Dify の API キー（Workflow を呼び出す権限を持つもの）
+- LibreOffice（PPTX ファイルを PDF に変換する場合に必要）
+  - macOS: `brew install libreoffice`
+  - Ubuntu/Debian: `sudo apt-get install libreoffice`
+  - Docker の場合: Dockerfile に `RUN apt-get update && apt-get install -y libreoffice` を追加
 
 ## セットアップ
 
@@ -132,6 +138,7 @@ streamlit run app.py
 2. Cloud 側の「Secrets」設定画面にローカルと同じ TOML 形式でシークレットを貼り付けます。
 3. GCS バケットが外部アクセスを許可しているか、必要なら CORS 設定を確認してください。
 4. 任意で `APP_VERSION` 環境変数を設定すると、アプリ内のバージョン表示に反映されます（未設定でも Git メタデータで自動表示されます）。
+5. **重要**: `packages.txt` ファイルがリポジトリに含まれていることを確認してください。このファイルには PPTX→PDF 変換に必要な LibreOffice が指定されています。Streamlit Cloud は自動的にこのファイルを読み込み、システムパッケージをインストールします。
 
 
 ## トラブルシューティング

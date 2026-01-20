@@ -3,6 +3,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 from typing import Optional
 from urllib.parse import quote as url_quote
@@ -70,24 +71,102 @@ def _build_gcs_client(gcs_conf: dict) -> storage.Client:
     return storage.Client(project=project_id, credentials=credentials)
 
 
+def convert_pptx_to_pdf(pptx_bytes: bytes, original_filename: str) -> tuple[bytes, str]:
+    """Convert PPTX file to PDF using LibreOffice.
+
+    Args:
+        pptx_bytes: The PPTX file content as bytes
+        original_filename: Original filename for reference
+
+    Returns:
+        tuple of (pdf_bytes, pdf_filename)
+
+    Raises:
+        RuntimeError: If conversion fails
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Save PPTX to temporary file
+        pptx_path = os.path.join(temp_dir, original_filename)
+        with open(pptx_path, "wb") as f:
+            f.write(pptx_bytes)
+
+        # Convert to PDF using LibreOffice
+        try:
+            result = subprocess.run(
+                [
+                    "soffice",
+                    "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", temp_dir,
+                    pptx_path
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"LibreOffice conversion failed: {exc.stderr}") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("LibreOffice conversion timed out") from exc
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "LibreOffice (soffice) not found. Please install LibreOffice on the server."
+            ) from exc
+
+        # Find the generated PDF file
+        pdf_filename = os.path.splitext(original_filename)[0] + ".pdf"
+        pdf_path = os.path.join(temp_dir, pdf_filename)
+
+        if not os.path.exists(pdf_path):
+            raise RuntimeError(f"PDF file was not generated: {pdf_path}")
+
+        # Read the PDF content
+        with open(pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+
+        return pdf_bytes, pdf_filename
+
+
 def upload_file_to_gcs(uploaded_file, *, destination_name: Optional[str] = None) -> dict:
-    """Upload an in-memory Streamlit file to Google Cloud Storage and return its metadata."""
+    """Upload an in-memory Streamlit file to Google Cloud Storage and return its metadata.
+
+    If the file is a PPTX, it will be converted to PDF before uploading.
+    """
     gcs_conf = _get_gcs_config()
     client = _build_gcs_client(gcs_conf)
     bucket = client.bucket(gcs_conf["bucket_name"])
 
-    blob_name = destination_name or uploaded_file.name
+    # Check if file is PPTX and convert to PDF
+    original_filename = uploaded_file.name
+    file_bytes = uploaded_file.getvalue()
+    content_type = uploaded_file.type or "application/octet-stream"
+
+    is_pptx = (
+        original_filename.lower().endswith(".pptx") or
+        content_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+
+    if is_pptx:
+        try:
+            file_bytes, converted_filename = convert_pptx_to_pdf(file_bytes, original_filename)
+            blob_name = destination_name or converted_filename
+            content_type = "application/pdf"
+        except RuntimeError as exc:
+            raise ValueError(f"PPTX to PDF conversion failed: {exc}") from exc
+    else:
+        blob_name = destination_name or original_filename
+
     if gcs_conf["upload_prefix"]:
         blob_name = f"{gcs_conf['upload_prefix']}/{blob_name}"
 
-    file_bytes = uploaded_file.getvalue()
     buffer = io.BytesIO(file_bytes)
     buffer.seek(0)
 
     blob = bucket.blob(blob_name)
     upload_kwargs = {
         "size": len(file_bytes),
-        "content_type": uploaded_file.type or "application/octet-stream",
+        "content_type": content_type,
         "rewind": True,
     }
     if gcs_conf["predefined_acl"]:
