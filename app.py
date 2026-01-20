@@ -174,10 +174,14 @@ def upload_file_to_gcs(uploaded_file, *, destination_name: Optional[str] = None)
 
     blob.upload_from_file(buffer, **upload_kwargs)
 
+    # Extract just the filename from blob_name (remove prefix if present)
+    uploaded_filename = blob_name.split('/')[-1] if '/' in blob_name else blob_name
+
     result = {
         "bucket": gcs_conf["bucket_name"],
         "blob_name": blob_name,
         "gs_uri": f"gs://{gcs_conf['bucket_name']}/{blob_name}",
+        "uploaded_filename": uploaded_filename,
     }
     if gcs_conf["make_public"]:
         try:
@@ -452,11 +456,12 @@ def main_ui():
                 except Exception as exc:  # noqa: BLE001
                     st.error(f"アップロードに失敗しました: {exc}")
                 else:
-                    # URL encode the filename to handle Japanese characters
-                    filename = uploaded_sidebar_file.name
-                    encoded_filename = url_quote(filename, safe='')
+                    # Use the uploaded filename (which may be converted to PDF)
+                    uploaded_filename = result.get("uploaded_filename", uploaded_sidebar_file.name)
+                    encoded_filename = url_quote(uploaded_filename, safe='')
                     st.session_state.dify_file_id = encoded_filename
-                    print(f"[DEBUG] Original filename: {filename}", flush=True)
+                    print(f"[DEBUG] Original filename: {uploaded_sidebar_file.name}", flush=True)
+                    print(f"[DEBUG] Uploaded filename: {uploaded_filename}", flush=True)
                     print(f"[DEBUG] Encoded file_id for Dify: {encoded_filename}", flush=True)
                     st.success("アップロード完了")
                     if result.get("public_url"):
