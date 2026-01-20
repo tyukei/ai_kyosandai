@@ -5,6 +5,7 @@ import re
 import subprocess
 import time
 from typing import Optional
+from urllib.parse import quote as url_quote
 
 import streamlit as st
 from google.api_core import exceptions as gcs_exceptions
@@ -366,13 +367,18 @@ def main_ui():
                 help="ファイルを選択すると自動でアップロードします。",
             )
             if uploaded_sidebar_file:
-                print("[DEBUG] uploading file to GCS:", uploaded_sidebar_file.name)
+                print("[DEBUG] uploading file to GCS:", uploaded_sidebar_file.name, flush=True)
                 try:
                     result = upload_file_to_gcs(uploaded_sidebar_file)
                 except Exception as exc:  # noqa: BLE001
                     st.error(f"アップロードに失敗しました: {exc}")
                 else:
-                    st.session_state.dify_file_id = uploaded_sidebar_file.name
+                    # URL encode the filename to handle Japanese characters
+                    filename = uploaded_sidebar_file.name
+                    encoded_filename = url_quote(filename, safe='')
+                    st.session_state.dify_file_id = encoded_filename
+                    print(f"[DEBUG] Original filename: {filename}", flush=True)
+                    print(f"[DEBUG] Encoded file_id for Dify: {encoded_filename}", flush=True)
                     st.success("アップロード完了")
                     if result.get("public_url"):
                         st.info("公開URL は GCS でご確認ください。")
