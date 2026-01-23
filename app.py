@@ -13,6 +13,7 @@ from google.api_core import exceptions as gcs_exceptions
 from google.cloud import storage
 from google.oauth2 import service_account
 import requests
+import gspread
 
 
 def _get_gcs_config() -> dict:
@@ -227,6 +228,97 @@ def _get_app_version(default: str = "dev") -> str:
 
 APP_VERSION = _get_app_version()
 
+# Authentication with Google Sheets
+
+
+def check_user_credentials(user_id: str, password: str) -> tuple[bool, bool]:
+    """Check user credentials against Google Sheets.
+
+    Returns:
+        tuple[bool, bool]: (is_authenticated, has_permission)
+    """
+    try:
+        if "auth" not in st.secrets:
+            raise ValueError("認証設定が secrets.toml にありません")
+
+        auth_conf = st.secrets["auth"]
+        spreadsheet_id = auth_conf.get("spreadsheet_id")
+        if not spreadsheet_id:
+            raise ValueError("スプレッドシートIDが設定されていません")
+
+        # Use the same service account as GCS
+        gcs_conf = _get_gcs_config()
+        credentials = service_account.Credentials.from_service_account_info(
+            gcs_conf["service_account"],
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        )
+
+        # Initialize gspread client
+        gc = gspread.authorize(credentials)
+
+        # Open the spreadsheet
+        spreadsheet = gc.open_by_key(spreadsheet_id)
+        worksheet = spreadsheet.get_worksheet(0)
+
+        # Get all records
+        records = worksheet.get_all_records()
+
+        # Check credentials
+        for record in records:
+            if str(record.get("id", "")).strip() == user_id.strip():
+                if str(record.get("password", "")).strip() == password.strip():
+                    # Check permission (TRUE/FALSE)
+                    permission = record.get("permission", False)
+                    if isinstance(permission, str):
+                        has_permission = permission.strip().upper() == "TRUE"
+                    else:
+                        has_permission = bool(permission)
+                    return True, has_permission
+                else:
+                    return False, False
+
+        return False, False
+
+    except Exception as exc:
+        st.error(f"認証エラー: {exc}")
+        return False, False
+
+
+def show_login_page():
+    """Display login page and handle authentication."""
+    st.set_page_config(page_title="PIVOT AI - ログイン", page_icon="🔐", layout="centered")
+
+    st.title("🔐 PIVOT AI ログイン")
+    st.markdown("---")
+
+    with st.form("login_form"):
+        user_id = st.text_input("ユーザーID", placeholder="IDを入力してください")
+        password = st.text_input("パスワード", type="password", placeholder="パスワードを入力してください")
+        submit_button = st.form_submit_button("ログイン", use_container_width=True)
+
+        if submit_button:
+            if not user_id or not password:
+                st.error("ユーザーIDとパスワードを入力してください")
+            else:
+                with st.spinner("認証中..."):
+                    is_authenticated, has_permission = check_user_credentials(user_id, password)
+
+                    if is_authenticated:
+                        if has_permission:
+                            st.session_state.authenticated = True
+                            st.session_state.user_id = user_id
+                            st.success("ログインに成功しました!")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.error("アクセス権限がありません。管理者にお問い合わせください。")
+                    else:
+                        st.error("ユーザーIDまたはパスワードが間違っています")
+
+    st.markdown("---")
+    st.caption("")# © 神社仏閣オンライン株式会社とか入れるならここに
+
+
 # Dify周りの設定
 
 
@@ -404,6 +496,11 @@ def stream_dify(prompt: str):
         response.close()
 
 def main_ui():
+    # Check authentication status
+    if "authenticated" not in st.session_state or not st.session_state.authenticated:
+        show_login_page()
+        return
+
     st.set_page_config(page_title="PIVOT AI", page_icon="💬", layout="wide")
     st.title("PIVOT AI")
 
@@ -427,6 +524,14 @@ def main_ui():
         st.session_state.dify_system_prompt = ""
 
     with st.sidebar:
+        # User info and logout
+        st.markdown(f"**ログイン中:** {st.session_state.get('user_id', 'Unknown')}")
+        if st.button("ログアウト", key="logout-button", use_container_width=True):
+            st.session_state.authenticated = False
+            st.session_state.user_id = None
+            st.rerun()
+
+        st.markdown("---")
         st.subheader("AIオプション")
         st.selectbox(
             "is_rag (任意)",
