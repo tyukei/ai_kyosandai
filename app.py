@@ -5,6 +5,7 @@ import re
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote as url_quote
 
@@ -231,6 +232,42 @@ APP_VERSION = _get_app_version()
 # Authentication with Google Sheets
 
 
+def _parse_date(date_str: str) -> datetime | None:
+    """Parse date string from spreadsheet (supports YYYY/MM/DD and YYYY-MM-DD formats)."""
+    if not date_str or not isinstance(date_str, str):
+        return None
+    date_str = date_str.strip()
+    if not date_str:
+        return None
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(date_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _check_date_permission(start_date_str: str, end_date_str: str) -> bool:
+    """Check if current time (JST) is within the permission period.
+
+    Permission is granted from perStartDate 0:00 to perEndDate 23:59 (JST).
+    """
+    JST = timezone(timedelta(hours=9))
+    now_jst = datetime.now(JST)
+
+    start_date = _parse_date(start_date_str)
+    end_date = _parse_date(end_date_str)
+
+    if start_date is None or end_date is None:
+        return False
+
+    # Set start to 0:00 JST and end to 23:59:59 JST
+    start_datetime = start_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=JST)
+    end_datetime = end_date.replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=JST)
+
+    return start_datetime <= now_jst <= end_datetime
+
+
 def check_user_credentials(user_id: str, password: str) -> tuple[bool, bool]:
     """Check user credentials against Google Sheets.
 
@@ -256,9 +293,9 @@ def check_user_credentials(user_id: str, password: str) -> tuple[bool, bool]:
         # Initialize gspread client
         gc = gspread.authorize(credentials)
 
-        # Open the spreadsheet
+        # Open the spreadsheet and get "アクセス管理" sheet
         spreadsheet = gc.open_by_key(spreadsheet_id)
-        worksheet = spreadsheet.get_worksheet(0)
+        worksheet = spreadsheet.worksheet("アクセス管理")
 
         # Get all records
         records = worksheet.get_all_records()
@@ -267,12 +304,10 @@ def check_user_credentials(user_id: str, password: str) -> tuple[bool, bool]:
         for record in records:
             if str(record.get("id", "")).strip() == user_id.strip():
                 if str(record.get("password", "")).strip() == password.strip():
-                    # Check permission (TRUE/FALSE)
-                    permission = record.get("permission", False)
-                    if isinstance(permission, str):
-                        has_permission = permission.strip().upper() == "TRUE"
-                    else:
-                        has_permission = bool(permission)
+                    # Check permission by date range (perStartDate to perEndDate)
+                    start_date = str(record.get("perStartDate", ""))
+                    end_date = str(record.get("perEndDate", ""))
+                    has_permission = _check_date_permission(start_date, end_date)
                     return True, has_permission
                 else:
                     return False, False
